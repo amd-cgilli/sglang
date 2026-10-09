@@ -19,7 +19,7 @@ from gdn_block import BA, BA_LIGHT, CONV_SLOT_BYTES, DEPTH, HEADS, HIDDEN_V, QKV
 from gdn_core_op import CONV_CH, D, IN_DIM, STAGE_STRIDE, V_HEADS, gdn_core_prefetch
 from gdn_verify_op import MARKS as VERIFY_MARKS, emit_gdn_verify, gdn_verify_snapshots
 from gemv_op import MARKS as GEMV_MARKS, NBLK, RED_WORDS, emit_gemv, gemv_prefetch
-from hc_op import (HC, LOW, H, emit_hc_norm, emit_hc_up, emit_inject, finish_epoch, hc_norm_load, hc_up_prefetch,
+from hc_op import (HC, LOW, H, emit_hc_norm, emit_hc_up_mfma, emit_inject, finish_epoch, hc_norm_load, hc_up_prefetch_mfma,
                    inject_prefetch, next_epoch_tag, publish_combine, publish_low)
 from timeline import mark
 
@@ -82,6 +82,7 @@ def build(traced, tokens=T_VERIFY, win_dedup=False):
         rs = lambda t, nbytes, base=None: buffer_ops.create_buffer_resource(
             t, max_size=False, num_records_bytes=nbytes, base_byte_offset=base)
         smem = fx.SharedAllocator().allocate(VerifyBlockSmem).peek()
+        up_scratch = fx.recast_iter(fx.Int32, smem.partial.ptr)  # free between emit_gemvs
         n_ptr, stage = smem.big.ptr, fx.recast_iter(fx.Float32, smem.big.ptr)
         bid = fx.Int32(fx.block_idx.x)
         tag = next_epoch_tag(rs(sync, 8))
@@ -100,13 +101,13 @@ def build(traced, tokens=T_VERIFY, win_dedup=False):
         hn = hc_norm_load(r_rs, rs(hc_norm_w, HC * 2), tokens)
         down_w = gemv_prefetch(w_down_rs, LOW, HC, 4, 4, DEPTH, light=HEADS)
         emit_hc_norm(hn, smem, n_ptr)
-        up_w = hc_up_prefetch(w_up_rs)
+        up_w = hc_up_prefetch_mfma(w_up_rs)
         mark(trace, 4, M_NORM + 1, traced)
 
         emit_gemv(low_rs, w_down_rs, low_rs, smem.partial.ptr, trace, tag, tag, LOW, HC, 4, 4, DEPTH, True, M_DOWN,
                   traced, x_lds=n_ptr, inflight=down_w, light=HEADS, x_lds_ready=True,
                   publish=functools.partial(publish_low, low_rs, tag), tokens=tokens)
-        emit_hc_up(up_w, low_rs, tag, x_rs, tag, smem, tokens, n_ptr)
+        emit_hc_up_mfma(up_w, low_rs, tag, x_rs, tag, smem, up_scratch, tokens, n_ptr)
         mark(trace, 4, M_UP + 1, traced)
         core = gdn_core_prefetch(bid, rs(conv_w, CONV_CH * 4 * 2), conv_rs, ssm_rs, rs(norm_w, D * 2))
 

@@ -308,6 +308,7 @@ class Envs:
     # gated write) as one FlyDSL launch (megakernel/basics/gdn_block.py) for TP1 decode at batch 1.
     # Other shapes and phases keep the original path.
     SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL = EnvBool(False)
+    SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL_FFN = EnvBool(True)
     # --ple-offload-backend file: where the sparse, file-backed PLE table lives
     # (deterministic name, reused across restarts), whether prefill-sized
     # gathers hint the page cache first, and an escape hatch for the device

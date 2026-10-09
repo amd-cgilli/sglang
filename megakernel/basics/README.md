@@ -545,3 +545,64 @@ So it is within stock's noise. Verify (MTP) still runs the attention half only.
 
 The whole-layer path is taken at batch-1 decode when the MoE passes `_has_mxfp4_moe`. Otherwise
 the attention half runs as before. A failed check is logged once, with the reason.
+
+## Step 8: a whole GDN layer for MTP verify in one launch (`moe_verify_op.py`, `gdn_layer_verify.py`, `step8_gdn_layer_verify.py`)
+
+`gdn_layer_verify` is `gdn_block_verify` with R' handed to an FFN half for the 4 draft tokens. The
+hc read 2 and the router are the decode ones with `tokens=4`. The MoE is split by **unique
+expert**, so each expert's weights are read once for every token that picked it.
+
+| phase | blocks | work |
+|---|---|---|
+| top-k | every block, wave t = token t | top 10 + shared, packed-key reduce; shared gate from raw x |
+| expert table | every block | unique experts of the 4 x 11 entries (<= 41), first-occurrence order, a weight per token |
+| stage 1 | all, units (expert, 32-group) in a device loop | 20 FP4 MFMAs a wave (A: 16 weight rows from the loads, B: x of the 4 tokens as columns); h published as FP4 words + scale |
+| stage 2 | 0..159 | h of all experts into LDS (FP4, 66 KB); per wave its experts in a device loop, 5 MFMAs each, weights 2 experts ahead as loop-carried state |
+
+**MFMA.** `v_mfma_scale_f32_16x16x128_f8f6f4` with both operands FP4 takes aiter's shuffled weight
+layout as is. Our 16 B lane load (row `lane % 16`, K block `lane / 16`) is the A operand, and the
+E8M0 scale is the low byte of the scale dword. This was checked bit-exact against torch with a
+one-wave probe. The same tokens-as-columns trick, with the 16x16x32 bf16 MFMA, now does `hc_up`
+in all four kernels (`emit_hc_up_mfma`): 12 to 4 us at 4 tokens, and the decode layer 74.9 to 67.0 us.
+
+**Register pressure was the hard part.** The first version spilled 4,000 VGPRs and took 1.4 ms.
+- Unrolled over 4 tokens and 4 units, LLVM CSE'd and LICM'd loads and decodes across tokens and
+  units (x is loop-invariant across units), then interleaved the independent token chains.
+- The cure was device loops (`for k in range(...)`, not `range_constexpr`) with nothing hoistable
+  in the body, and MFMA, which removes the decodes and dot2s altogether.
+
+**Checked** (layer-0 weights, 32 launches, ~40 unique experts a launch, i.e. close to the worst case):
+- R_out is exact (0 ulps) against the reference on the kernel's own x2.
+- Against stock's `fused_moe` on the same input it is 6 to 10 ulps (stock is nondeterministic, step 7).
+- Reruns are bit-identical.
+
+**Time: 150.9 us per launch** against a 44 us bound (265 MB, 104 MB of it the experts). The attention
+half takes ~66 us. Stock's `fused_moe` alone takes 46 us at 4 tokens, before its gate, top-k and
+hc kernels.
+
+**End to end with MTP** (`bench/ab_c1.sh`, `SERVER=run_server_mtp.sh`: MXFP4 TP1, NEXTN 3/4/1,
+simulated accept 2.32, random 1024 / 512, 8 requests at concurrency 1, GPU 7, 2026-10-09):
+
+| | Median TPOT | Output tok/s | Accept length |
+|---|---|---|---|
+| stock | 8.36 ms | 116.3 | 2.32 |
+| attention half fused (step 6), first version | 7.42 ms | 129.8 | 2.31 |
+| whole layer fused, first version (162.6 us) | 6.93 ms | 139.6 | 2.31 |
+| **whole layer fused (150.9 us)** | **6.70 ms (-20%)** | **142.7 (+23%)** | 2.34 |
+
+`SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL_FFN=0` keeps the attention half only, for A/Bs.
+
+**Logprobs with real MTP** (`REAL_MTP=1 run_server_mtp.sh`, `bench/server_logprobs.py`, short prompt,
+decode positions up to the first greedy divergence):
+
+| pairs | median argmax \|dlp\| | median p-weighted \|dlp\| |
+|---|---|---|
+| stock vs stock | 0.075 | 0.102 |
+| whole layer vs stock (10 pairs) | 0.047 | 0.084 |
+| attention half only vs stock (6 pairs) | 0.091 | 0.152 |
+
+At position 2 the first request after a server start sometimes takes another token. Its logprob
+varies from -0.04 to -0.55 between runs, and this happens with the attention half alone too.
+
+**Next:** in_proj and out_proj as tokens-as-N MFMA (12 + 6.5 us of dot2 + reductions); the
+stage-1 tail (blocks with a 4th unit end ~10 us late); hc_norm 2's read of R' as tagged pairs.

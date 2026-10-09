@@ -138,7 +138,8 @@ def moe_stock(x, ids, wts, mw):
 
     w13, w2 = mw["w13"].view(torch.float4_e2m1fn_x2), mw["w2"].view(torch.float4_e2m1fn_x2)
     w13.is_shuffled = w2.is_shuffled = True
-    return fused_moe(x, w13, w2, wts[None].float(), ids[None].int(), activation=ActivationType.Silu,
+    n = x.shape[0]  # tokens: ids, wts are [n * 11]
+    return fused_moe(x, w13, w2, wts.view(n, -1).float(), ids.view(n, -1).int(), activation=ActivationType.Silu,
                      quant_type=QuantType.per_1x32, w1_scale=mw["s13"], w2_scale=mw["s2"],
                      intermediate_pad=INTER_PAD - INTER, gate_mode=GateMode.SEPARATED.value)
 

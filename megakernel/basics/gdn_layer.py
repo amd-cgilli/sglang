@@ -26,8 +26,8 @@ from gdn_block import (BA, BA_LIGHT, CONV_SLOT_BYTES, DEPTH, HEADS, HIDDEN_V, M_
                        BlockSmem)
 from gdn_core_op import CONV_CH, D, IN_DIM, V_HEADS, ack_pairs, emit_gdn_core, gdn_core_prefetch, gdn_core_write_state
 from gemv_op import NBLK, emit_gemv, gemv_prefetch
-from hc_op import (HC, LOW, H, combine_rows16, emit_hc_norm, emit_hc_up, emit_inject, finish_epoch, hc_norm_load,
-                   hc_norm_poll, hc_up_prefetch, inject_prefetch, next_epoch_tag, publish_combine_mailbox,
+from hc_op import (HC, LOW, H, combine_rows16, emit_hc_norm, emit_hc_up_mfma, emit_inject, finish_epoch, hc_norm_load,
+                   hc_norm_poll, hc_up_prefetch_mfma, inject_prefetch, next_epoch_tag, publish_combine_mailbox,
                    publish_low)
 from moe_op import (N_ROUTED, S1_BLOCKS, S2_BLOCKS, SLOTS, INTER, W13_BYTES, W13_GROUPS, W13_ROWS, W2_BYTES, W2_GROUPS,
                     MoeSmem, emit_stage1, emit_stage2, emit_topk, poll_to_lds, publish_f32, quantize_x_lds,
@@ -83,6 +83,7 @@ def build(traced):
         rs = lambda t, nbytes, base=None: buffer_ops.create_buffer_resource(
             t, max_size=False, num_records_bytes=nbytes, base_byte_offset=base)
         smem = fx.SharedAllocator().allocate(LayerSmem).peek()
+        up_scratch = fx.recast_iter(fx.Int32, smem.partial.ptr)  # free between emit_gemvs
         bid = fx.Int32(fx.block_idx.x)
         tag = next_epoch_tag(rs(sync, 8))
         slot = fx.Int32(buffer_ops.buffer_load(rs(cache_idx, 4), 0, vec_width=1, dtype=T.i32))
@@ -102,13 +103,13 @@ def build(traced):
         hn = hc_norm_load(r_rs, rs(hc_norm_w, HC * 2))
         down_w = gemv_prefetch(w_down_rs, LOW, HC, 4, 4, DEPTH, light=HEADS)
         emit_hc_norm(hn, smem)
-        up_w = hc_up_prefetch(w_up_rs)
+        up_w = hc_up_prefetch_mfma(w_up_rs)
         mark(trace, 4, M_NORM + 1, traced)
 
         emit_gemv(low_rs, w_down_rs, low_rs, smem.partial.ptr, trace, tag, tag, LOW, HC, 4, 4, DEPTH, True, M_DOWN,
                   traced, x_lds=smem.n.ptr, inflight=down_w, light=HEADS, x_lds_ready=True,
                   publish=functools.partial(publish_low, low_rs, tag))
-        emit_hc_up(up_w, low_rs, tag, x_rs, tag, smem)
+        emit_hc_up_mfma(up_w, low_rs, tag, x_rs, tag, smem, up_scratch, 1)
         mark(trace, 4, M_UP + 1, traced)
         core = gdn_core_prefetch(bid, rs(conv_w, CONV_CH * 4 * 2), conv_rs, ssm_rs, rs(norm_w, D * 2))
 
@@ -135,14 +136,14 @@ def build(traced):
         down2_w = gemv_prefetch(w_down2_rs, LOW, HC, 4, 4, DEPTH, light=HEADS)
         hn2 = hc_norm_poll(r1_rs, tag, rs(hc2_norm_w, HC * 2))
         emit_hc_norm(hn2, smem)
-        up2_w = hc_up_prefetch(rs(w_up2, HC * LOW * 2))
+        up2_w = hc_up_prefetch_mfma(rs(w_up2, HC * LOW * 2))
         mark(trace, 4, M_NORM2 + 1, traced)
 
         emit_gemv(low2_rs, w_down2_rs, low2_rs, smem.partial.ptr, trace, tag, tag, LOW, HC, 4, 4, DEPTH, True,
                   M_DOWN2, traced, x_lds=smem.n.ptr, inflight=down2_w, light=HEADS, x_lds_ready=True,
                   publish=functools.partial(publish_low, low2_rs, tag))
         inj2 = inject_prefetch(rs(w_inj2, 4 * HC * 2), bid < S2_BLOCKS)
-        emit_hc_up(up2_w, low2_rs, tag, x2_rs, tag, smem)
+        emit_hc_up_mfma(up2_w, low2_rs, tag, x2_rs, tag, smem, up_scratch, 1)
         emit_inject(inj2, smem)  # off the critical path: the router waits for every block's x2
         mark(trace, 4, M_UP2, traced)
 

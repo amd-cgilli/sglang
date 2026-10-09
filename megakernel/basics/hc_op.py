@@ -11,11 +11,12 @@ Every block computes n itself (20 KB of R) rather than receiving it: a handoff c
 """
 
 import flydsl.expr as fx
-from flydsl.expr import range_constexpr
+from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T
 
 import buffer_ops
 from common import CM_DEV, bf16x2, device, poll_pairs, poll_pairs_first_then_rest, put_pair
+from moe_op import poll_to_lds
 from skinny_bf16 import _dot2_f32_bf16, _pair, _wave_reduce_add_f32
 
 S, H, LOW = 4, 2560, 320
@@ -259,29 +260,94 @@ def publish_combine_mailbox(r_rs, mb_rs, c_ptr, tag, t, pair, lo, hi, valid):
 
 
 @device
-def hc_norm_poll(r_mb_rs, tag, w_rs):
-    """hc_norm_load's result from an R mailbox ([HC] pairs) instead of a plain tensor. Spins on one
-    chunk a thread first, then fetches the rest: spinning on all reloads them on every retry."""
+def hc_norm_poll(r_mb_rs, tag, w_rs, tokens=1):
+    """hc_norm_load's result from an R mailbox ([T, HC] pairs) instead of a plain tensor. Per
+    token, spins on one chunk a thread first, then fetches the rest: spinning on all reloads them
+    on every retry."""
     tid = fx.Int32(fx.thread_idx.x)
     chunks = [tid + 256 * i for i in range(HC // 8 // 256)]  # 8 values = pairs 4c .. 4c + 3
-    first = poll_pairs(r_mb_rs, [4 * chunks[0], 4 * chunks[0] + 2], tag)
-    rest = poll_pairs(r_mb_rs, [4 * c + h for c in chunks[1:] for h in (0, 2)], tag)
-    words = first + rest
-    rows = [fx.Vector.from_elements(words[4 * i: 4 * i + 4], fx.Int32) for i in range(len(chunks))]
+    rows = []
+    for t in range_constexpr(tokens):
+        base = t * (HC // 2)
+        first = poll_pairs(r_mb_rs, [base + 4 * chunks[0], base + 4 * chunks[0] + 2], tag)
+        rest = poll_pairs(r_mb_rs, [base + 4 * c + h for c in chunks[1:] for h in (0, 2)], tag)
+        words = first + rest
+        rows.append([fx.Vector.from_elements(words[4 * i: 4 * i + 4], fx.Int32) for i in range(len(chunks))])
     load = lambda c: fx.Vector(buffer_ops.buffer_load(w_rs, c * 4, vec_width=4, dtype=T.i32))
-    return [rows], [load(c) for c in chunks]
+    return rows, [load(c) for c in chunks]
 
 
 @device
-def combine_rows16(r_mb_rs, tag, out_rs, y_ptr, c_ptr):
-    """R''[s H + j] = bf16(R'[s H + j] + bf16(y[j]) c[s]) for the block's 16 rows j = 16 bid + i
-    (y fp32 at y_ptr), R' from its mailbox; plain stores to out_rs."""
+def combine_rows16(r_mb_rs, tag, out_rs, y_ptr, c_ptr, tokens=1):
+    """R''[t, s H + j] = bf16(R'[t, s H + j] + bf16(y[t][j]) c[t][s]) for the block's 16 rows
+    j = 16 bid + i (y fp32 at y_ptr, [T, 16]), R' from its mailbox; plain stores to out_rs."""
     tid = fx.Int32(fx.thread_idx.x)
-    if tid < 32:
-        s, q = tid // 8, tid % 8
-        pair = s * (H // 2) + fx.Int32(fx.block_idx.x) * 8 + q
+    if tid < 32 * tokens:
+        t, s, q = tid // 32, (tid // 8) % 4, tid % 8
+        pair = t * (HC // 2) + s * (H // 2) + fx.Int32(fx.block_idx.x) * 8 + q
         words = poll_pairs(r_mb_rs, [(pair // 2) * 2], tag)
         r_lo, r_hi = _unpack((pair % 2 == 1).select(words[1], words[0]))
-        y_lo, y_hi = _bf16(fx.ptr_load(y_ptr + 2 * q)), _bf16(fx.ptr_load(y_ptr + 2 * q + 1))
-        c = fx.ptr_load(c_ptr + s)
+        y = y_ptr + t * 16 + 2 * q
+        y_lo, y_hi = _bf16(fx.ptr_load(y)), _bf16(fx.ptr_load(y + 1))
+        c = fx.ptr_load(c_ptr + t * S + s)
         buffer_ops.buffer_store(bf16x2(r_lo + y_lo * c, r_hi + y_hi * c), out_rs, pair)
+
+
+# ===== hc_up as MFMA (T tokens: no wave reductions) =====
+
+UP_ROWS = S * UP_PER_BLOCK  # 40 W_up rows a block: r = s * 10 + j
+UP_STEPS = LOW // 32  # 10 MFMAs (16 x 16 x 32 bf16) a row tile
+
+
+def hc_up_prefetch_mfma(w_up_rs):
+    """Wave w < 3 loads row tile w (rows r = 16 w + lane % 16 < 40) as MFMA A operands: per step,
+    8 bf16 of K block lane / 16; 10 x 16 B a lane. Wave 3 and rows past 40 load out of bounds."""
+    tid = fx.Int32(fx.thread_idx.x)
+    lane, wave = tid % 64, tid // 64
+    r = wave * 16 + lane % 16
+    bid = fx.Int32(fx.block_idx.x)
+    row = (r < UP_ROWS).select((r // UP_PER_BLOCK) * H + bid * UP_PER_BLOCK + r % UP_PER_BLOCK, fx.Int32(HC))
+    return [buffer_ops.buffer_load(w_up_rs, row * (LOW // 2) + st * 16 + (lane // 16) * 4, vec_width=4, dtype=T.i32)
+            for st in range(UP_STEPS)]
+
+
+@device
+def emit_hc_up_mfma(inflight, low_rs, low_tag, x_rs, x_tag, smem, scratch, tokens, n_ptr=None):
+    """emit_hc_up for T tokens with one MFMA chain a row tile: d[t][r] = W_up[r] . low[t] with the
+    tokens as B columns. scratch: >= T * 200 words of LDS (low, then sigmoid(d) n)."""
+    n_ptr = smem.n.ptr if n_ptr is None else n_ptr
+    tid = fx.Int32(fx.thread_idx.x)
+    lane, wave = tid % 64, tid // 64
+    bid = fx.Int32(fx.block_idx.x)
+    low_lds, vals = scratch, fx.recast_iter(fx.Float32, scratch + tokens * (LOW // 2))
+    poll_to_lds(low_rs, low_tag, low_lds, tokens * LOW)
+    tok, blk = lane % 16, lane // 16
+    tc = fx.min(tok, tokens - 1)
+    if wave < 3:
+        acc = fx.Vector.from_elements([fx.Float32(0.0)] * 4, fx.Float32)
+        for st in range_constexpr(UP_STEPS):
+            b = fx.Vector(fx.ptr_load(low_lds + tc * (LOW // 2) + st * 16 + blk * 4, result_type=T.vec(4, T.i32)))
+            b = fx.Vector.from_elements([(tok < tokens).select(b[i], fx.Int32(0)) for i in range(4)], fx.Int32)
+            acc = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(
+                T.vec(4, T.f32), [fx.Vector(inflight[st]).bitcast(fx.BFloat16).ir_value(),
+                                  b.bitcast(fx.BFloat16).ir_value(), acc.ir_value(), 0, 0, 0]))
+        if tok < tokens:
+            for i in range_constexpr(4):
+                r = wave * 16 + blk * 4 + i
+                if r < UP_ROWS:
+                    row = (r // UP_PER_BLOCK) * H + bid * UP_PER_BLOCK + r % UP_PER_BLOCK
+                    n_lo, n_hi = _unpack(fx.ptr_load(n_ptr + (tok * HC + row) // 2))
+                    fx.ptr_store(_sigmoid(acc[i]) * (row % 2 == 1).select(n_hi, n_lo), vals + tok * UP_ROWS + r)
+    fx.gpu.barrier()
+    if tid < tokens * UP_PER_BLOCK:
+        xt, xj = tid // UP_PER_BLOCK, tid % UP_PER_BLOCK
+        a = fx.ptr_load(vals + xt * UP_ROWS + xj)  # stream order as emit_hc_up
+        for s in range_constexpr(1, S):
+            a = a + fx.ptr_load(vals + xt * UP_ROWS + s * UP_PER_BLOCK + xj)
+        fx.ptr_store(_bf16(a * 0.25), smem.x.ptr + xt * UP_PER_BLOCK + xj)
+    fx.gpu.barrier()
+    half = UP_PER_BLOCK // 2
+    if tid < tokens * half:
+        pt, pq = tid // half, tid % half
+        p = smem.x.ptr + pt * UP_PER_BLOCK + 2 * pq
+        put_pair(x_rs, pt * (H // 2) + bid * half + pq, bf16x2(fx.ptr_load(p), fx.ptr_load(p + 1)), x_tag)

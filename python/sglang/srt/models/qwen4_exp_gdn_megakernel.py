@@ -6,9 +6,9 @@ gated norm, out_proj) and gated write (hc_combine), on the layer's own weights a
 backend's conv and SSM pools. It runs only where it is exact to the original path's math, at batch
 1, TP1 and an fp32 SSM state: decode (gdn_block.py) and the MTP target-verify pass over 4 chain
 draft tokens (gdn_block_verify.py), which writes the per-token conv windows and SSM snapshots
-SGLang commits from after verify. Decode with quark MXFP4 experts (aiter's layout, the shared
-expert fused as expert 512) runs the whole layer, the FFN half's gated read, MoE and gated write
-included, in one launch (gdn_layer.py).
+SGLang commits from after verify. With quark MXFP4 experts (aiter's layout, the shared expert
+fused as expert 512) both run the whole layer, the FFN half's gated read, MoE and gated write
+included, in one launch (gdn_layer.py, gdn_layer_verify.py).
 """
 
 import logging
@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 _KERNEL_DIR = Path(__file__).resolve().parents[4] / "megakernel" / "basics"
 VERIFY_TOKENS = 4  # gdn_block_verify is compiled for --speculative-num-draft-tokens 4
-# Per kind ("decode", "verify", "layer"): compiled launch, mailboxes; the kernel modules once.
+# Per kernel ("decode", "verify": the attention half; "layer", "layer_verify": the whole layer):
+# compiled launch, mailboxes; the kernel modules once.
 _state = {"modules": None, "compiled": {}, "mailboxes": {}, "trace": None, "failed": False, "skips": set()}
 
 
@@ -42,8 +43,10 @@ def _kernel_modules():
         import gdn_block
         import gdn_block_verify
         import gdn_layer
+        import gdn_layer_verify
 
-        _state["modules"] = {"decode": gdn_block, "verify": gdn_block_verify, "layer": gdn_layer}
+        _state["modules"] = {"decode": gdn_block, "verify": gdn_block_verify, "layer": gdn_layer,
+                             "layer_verify": gdn_layer_verify}
     return _state["modules"]
 
 
@@ -160,7 +163,10 @@ _MXFP4_MOE_SHAPES = {  # aiter's padded layout: intermediate 640 -> 768, 512 exp
 
 def _has_mxfp4_moe(layer) -> bool:
     """The MoE is what gdn_layer.py computes: quark W4A4 MXFP4 experts preshuffled for aiter's
-    separated gate / up kernels, softmax top-10 renormalized, the shared expert fused at TP1."""
+    separated gate / up kernels, softmax top-10 renormalized, the shared expert fused at TP1.
+    False with SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL_FFN=0 (the attention half only)."""
+    if not envs.SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL_FFN.get():
+        return False
     cached = layer.__dict__.get("_gdn_megakernel_mxfp4_moe")
     if cached is None:
         from sglang.srt.layers.quantization.quark.quark import QuarkFusedMoEMethod
@@ -233,7 +239,7 @@ def eligible(layer, hidden_states: torch.Tensor, forward_batch) -> bool:
     kind = _kind(hidden_states, forward_batch)
     if not kind:
         return False
-    kernel = "layer" if kind == "decode" and _has_mxfp4_moe(layer) else kind
+    kernel = _whole_layer_kernel(kind) if _has_mxfp4_moe(layer) else kind
     if not any(k[0] == kernel for k in _state["compiled"]) and torch.cuda.is_current_stream_capturing():
         return False  # compiling runs a launch; SGLang's eager warmups compile it before capture
     return bool(_layer_state(layer, forward_batch, kind == "verify"))
@@ -254,7 +260,8 @@ def _launch(kind: str, dedup: bool, residual: torch.Tensor, args_between: tuple)
         import flydsl.compiler as flyc
 
         logger.info(f"Compiling the Qwen4 GDN megakernel for {kind} (one launch per GDN layer at batch 1)")
-        build = module.build(False, module.T_VERIFY, dedup) if kind == "verify" else module.build(False)
+        verify = kind in ("verify", "layer_verify")
+        build = module.build(False, module.T_VERIFY, dedup) if verify else module.build(False)
         _state["compiled"][key] = flyc.compile(build, *args)  # also runs this launch
     else:
         _state["compiled"][key](*args)
@@ -274,11 +281,19 @@ def run_attention_half(layer, residual: torch.Tensor, forward_batch) -> torch.Te
     return r_out
 
 
+def _whole_layer_kernel(kind: str) -> str:
+    return {"decode": "layer", "verify": "layer_verify"}[kind]
+
+
 def run_layer(layer, residual: torch.Tensor, forward_batch) -> torch.Tensor:
-    """Decode, the whole layer: R_out = R' + c2 * moe(hc_mix2(R')) with R' as run_attention_half."""
-    state = _layer_state(layer, forward_batch, verify=False)
-    r_out = _launch("layer", False, residual, (*_weights(layer), *state, *_ffn_weights(layer)))
-    _track_decode_state(layer, forward_batch, state)
+    """The whole layer: R_out = R' + c2 * moe(hc_mix2(R')) with R' as run_attention_half, per
+    token row; decode or verify, with the attention half's state handling."""
+    kind = _kind(residual, forward_batch)
+    state = _layer_state(layer, forward_batch, kind == "verify")
+    dedup = kind == "verify" and _window_layout(state[3]) == "dedup"
+    r_out = _launch(_whole_layer_kernel(kind), dedup, residual, (*_weights(layer), *state, *_ffn_weights(layer)))
+    if kind == "decode":
+        _track_decode_state(layer, forward_batch, state)
     return r_out
 
 
@@ -288,8 +303,8 @@ def _track_decode_state(layer, forward_batch, state) -> None:
 
 
 def forward_layer(layer, hidden_states: torch.Tensor, forward_batch) -> Optional[torch.Tensor]:
-    """The whole decoder layer: in one launch (decode, MXFP4 experts), or the attention half in one
-    and the FFN half as the layer's own gated read, MoE and gated write. Leaves the residual stream
+    """The whole decoder layer: in one launch (MXFP4 experts), or the attention half in one and the
+    FFN half as the layer's own gated read, MoE and gated write. Leaves the residual stream
     written, as the original path."""
     stream = stream_of(forward_batch)
     if stream.pending is not None:
@@ -299,7 +314,7 @@ def forward_layer(layer, hidden_states: torch.Tensor, forward_batch) -> Optional
     else:
         stream.check(hidden_states)
         residual = hidden_states
-    if _kind(residual, forward_batch) == "decode" and _has_mxfp4_moe(layer):
+    if _has_mxfp4_moe(layer):
         return stream.write(run_layer(layer, residual, forward_batch))
     residual = run_attention_half(layer, residual, forward_batch)
 

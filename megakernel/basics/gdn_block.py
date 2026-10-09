@@ -28,7 +28,7 @@ import buffer_ops
 from gdn_core_op import (CONV_CH, D, IN_DIM, STAGE_STRIDE, V_HEADS, ack_pairs, emit_gdn_core, gdn_core_prefetch,
                          gdn_core_write_state)
 from gemv_op import NBLK, RED_WORDS, emit_gemv, gemv_prefetch
-from hc_op import (HC, LOW, H, emit_hc_norm, emit_hc_up, emit_inject, finish_epoch, hc_norm_load, hc_up_prefetch,
+from hc_op import (HC, LOW, H, emit_hc_norm, emit_hc_up_mfma, emit_inject, finish_epoch, hc_norm_load, hc_up_prefetch_mfma,
                    inject_prefetch, next_epoch_tag, publish_combine, publish_low)
 from timeline import mark
 
@@ -93,6 +93,7 @@ def build(traced):
         rs = lambda t, nbytes, base=None: buffer_ops.create_buffer_resource(
             t, max_size=False, num_records_bytes=nbytes, base_byte_offset=base)
         smem = fx.SharedAllocator().allocate(BlockSmem).peek()
+        up_scratch = fx.recast_iter(fx.Int32, smem.partial.ptr)  # free between emit_gemvs
         bid = fx.Int32(fx.block_idx.x)
         tag = next_epoch_tag(rs(sync, 8))
         slot = fx.Int32(buffer_ops.buffer_load(rs(cache_idx, 4), 0, vec_width=1, dtype=T.i32))
@@ -109,13 +110,13 @@ def build(traced):
         hn = hc_norm_load(r_rs, rs(hc_norm_w, HC * 2))
         down_w = gemv_prefetch(w_down_rs, LOW, HC, 4, 4, DEPTH, light=HEADS)
         emit_hc_norm(hn, smem)
-        up_w = hc_up_prefetch(w_up_rs)
+        up_w = hc_up_prefetch_mfma(w_up_rs)
         mark(trace, 4, M_NORM + 1, traced)
 
         emit_gemv(low_rs, w_down_rs, low_rs, smem.partial.ptr, trace, tag, tag, LOW, HC, 4, 4, DEPTH, True, M_DOWN,
                   traced, x_lds=smem.n.ptr, inflight=down_w, light=HEADS, x_lds_ready=True,
                   publish=functools.partial(publish_low, low_rs, tag))
-        emit_hc_up(up_w, low_rs, tag, x_rs, tag, smem)
+        emit_hc_up_mfma(up_w, low_rs, tag, x_rs, tag, smem, up_scratch, 1)
         mark(trace, 4, M_UP + 1, traced)
         # gdn_core's 64 KB state read (head blocks) goes out now: in flight during in_proj, ~15 us ahead.
         core = gdn_core_prefetch(bid, rs(conv_w, CONV_CH * 4 * 2), conv_rs, ssm_rs, rs(norm_w, D * 2))

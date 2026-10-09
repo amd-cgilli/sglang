@@ -74,6 +74,12 @@ def put_pair(rsrc, pair, word, tag):
                             cache_modifier=CM_DEV)
 
 
+def opaque_zero():
+    """0 the compiler can't see through (a side-effecting v_mov): an address offset by it is not
+    loop-invariant, so LICM / CSE won't hoist or merge loads that must stay in their iteration."""
+    return fx.Int32(llvm.InlineAsmOp(T.i32, [], "v_mov_b32 $0, 0", "=v", has_side_effects=True).result)
+
+
 def _spin_pause():
     """Opaque to the compiler, so the polling loads are not hoisted out of the retry loop."""
     llvm.InlineAsmOp(None, [], "s_nop 0", "", has_side_effects=True)

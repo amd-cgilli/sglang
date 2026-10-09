@@ -213,27 +213,33 @@ def stage1_unit():
     return u // S1_GROUPS, u % S1_GROUPS
 
 
-def stage1_prefetch(w13_rs, s13_rs, smem):
-    """Wave w loads 16 rows: gate rows (w < 2) or up rows (w >= 2) j0 + 16 (w % 2) .. + 16 of the
-    block's group; 20 wave loads of 16 rows x 64 B. The expert is smem.ids[slot]; blocks without a
-    stage-1 unit load out of bounds (no traffic). Returns (weight dwordx4s, scale dwords, bytes)."""
+def stage1_loads(w13_rs, s13_rs, expert, grp):
+    """Wave w loads 16 rows of `expert`: gate rows (w < 2) or up rows (w >= 2) 32 grp + 16 (w % 2)
+    .. + 16; 20 wave loads of 16 rows x 64 B (expert 513: out of bounds, no traffic). Returns
+    (weight dwordx4s, scale dwords, scale byte in each dword)."""
     tid = fx.Int32(fx.thread_idx.x)
     lane, wave = tid % 64, tid // 64
-    slot, grp = stage1_unit()
-    active = fx.Int32(fx.block_idx.x) >= 256 - S1_BLOCKS
-    expert = active.select(fx.ptr_load(smem.ids.ptr + fx.max(slot, 0)), fx.Int32(SHARED_ID + 1))
     ni, k1 = lane % 16, (lane // 16) % 2
     row_tile = (wave // 2) * (INTER_PAD // 16) + grp * 2 + wave % 2
     m = expert * W13_ROWS + row_tile * 16 + ni
-    weights, scales = [], []
+    weights, scales, sbyte = [], [], []
     for s in range(W13_BYTES // 64):
         kt = 2 * s + lane // 32
         off = _w_offset(expert, row_tile, kt, k1, ni, W13_ROWS, W13_BYTES // 32)
         weights.append(buffer_ops.buffer_load(w13_rs, off // 4, vec_width=4, dtype=T.i32, cache_modifier=CM_NT))
-        scales.append(buffer_ops.buffer_load(s13_rs, _scale_offset(m, kt * 2 + k1, W13_GROUPS) // 4, vec_width=1,
-                                             dtype=T.i32))
-    byte = lambda m, g: _scale_offset(m, g, W13_GROUPS) % 4
-    return weights, scales, [byte(m, 2 * (2 * s + lane // 32) + k1) for s in range(W13_BYTES // 64)]
+        g_off = _scale_offset(m, kt * 2 + k1, W13_GROUPS)
+        scales.append(buffer_ops.buffer_load(s13_rs, g_off // 4, vec_width=1, dtype=T.i32))
+        sbyte.append(g_off % 4)
+    return weights, scales, sbyte
+
+
+def stage1_prefetch(w13_rs, s13_rs, smem):
+    """stage1_loads for this block's unit; the expert is smem.ids[slot]. Blocks without a unit
+    load out of bounds."""
+    slot, grp = stage1_unit()
+    active = fx.Int32(fx.block_idx.x) >= 256 - S1_BLOCKS
+    expert = active.select(fx.ptr_load(smem.ids.ptr + fx.max(slot, 0)), fx.Int32(SHARED_ID + 1))
+    return stage1_loads(w13_rs, s13_rs, expert, grp)
 
 
 @device
@@ -281,26 +287,35 @@ def emit_stage1(pre, h_rs, tag, x_lds, smem):
 # ===== Stage 2: down projections of all slots for 16 output rows =====
 
 
+def stage2_loads(w2_rs, s2_rs, e, rt):
+    """One expert's w2 rows 16 rt .. + 16 (320 real bytes each): 5 wave loads (expert 513: out of
+    bounds). Returns (weights, scale dwords, scale bytes)."""
+    lane = fx.Int32(fx.thread_idx.x) % 64
+    ni, k1 = lane % 16, (lane // 16) % 2
+    m = e * H + rt * 16 + ni
+    weights, scales, sbyte = [], [], []
+    for s in range(W2_REAL // 64):  # K tiles 0..9 hold the real bytes
+        kt = 2 * s + lane // 32
+        weights.append(buffer_ops.buffer_load(w2_rs, _w_offset(e, rt, kt, k1, ni, H, W2_BYTES // 32) // 4,
+                                              vec_width=4, dtype=T.i32, cache_modifier=CM_NT))
+        g_off = _scale_offset(m, kt * 2 + k1, W2_GROUPS)
+        scales.append(buffer_ops.buffer_load(s2_rs, g_off // 4, vec_width=1, dtype=T.i32))
+        sbyte.append(g_off % 4)
+    return weights, scales, sbyte
+
+
 def stage2_prefetch(w2_rs, s2_rs, smem):
-    """Wave w loads slots w, w + 4, w + 8 (< 11) for the block's 16 rows: 5 wave loads each (320
-    real bytes a row). Expert ids come from smem.ids. Returns (weights, scale dwords, bytes)."""
-    tid = fx.Int32(fx.thread_idx.x)
-    lane, wave = tid % 64, tid // 64
+    """Wave w loads slots w, w + 4, w + 8 (< 11) for the block's 16 rows. Expert ids come from
+    smem.ids. Returns (weights, scale dwords, bytes)."""
+    wave = fx.Int32(fx.thread_idx.x) // 64
     rt = fx.Int32(fx.block_idx.x)
     active = rt < S2_BLOCKS  # the rest load out of bounds (no traffic)
-    ni, k1 = lane % 16, (lane // 16) % 2
     weights, scales, sbyte = [], [], []
     for i in range(3):
         slot = fx.min(wave + 4 * i, SLOTS - 1)  # wave 3's third slot is a duplicate, weighted 0
         e = active.select(fx.ptr_load(smem.ids.ptr + slot), fx.Int32(SHARED_ID + 1))
-        m = e * H + rt * 16 + ni
-        for s in range(W2_REAL // 64):  # 5 wave loads: K tiles 0..9 hold the real bytes
-            kt = 2 * s + lane // 32
-            weights.append(buffer_ops.buffer_load(w2_rs, _w_offset(e, rt, kt, k1, ni, H, W2_BYTES // 32) // 4,
-                                                  vec_width=4, dtype=T.i32, cache_modifier=CM_NT))
-            g = kt * 2 + k1
-            scales.append(buffer_ops.buffer_load(s2_rs, _scale_offset(m, g, W2_GROUPS) // 4, vec_width=1, dtype=T.i32))
-            sbyte.append(_scale_offset(m, g, W2_GROUPS) % 4)
+        w, sc, sb = stage2_loads(w2_rs, s2_rs, e, rt)
+        weights, scales, sbyte = weights + w, scales + sc, sbyte + sb
     return weights, scales, sbyte
 
 
