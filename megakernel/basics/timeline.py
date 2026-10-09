@@ -64,6 +64,8 @@ def write_trace(path, trace, spans):
             for launch in range(launches):
                 row = t[launch, b, w]
                 for name, first, last in spans:
+                    if row[first] == 0 or row[last] == 0:  # this wave didn't run that op
+                        continue
                     events.append({"ph": "X", "name": name, "pid": xcd, "tid": tid, "ts": us(int(row[first])),
                                    "dur": (int(row[last]) - int(row[first])) * NS_PER_TICK / 1e3,
                                    "args": {"launch": launch}})

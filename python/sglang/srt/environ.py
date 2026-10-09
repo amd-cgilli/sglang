@@ -304,6 +304,10 @@ class Envs:
     # Bitwise-exact, shape-guarded Qwen4 PLE decode fusion. Unsupported inputs
     # and phases fall back to the original implementation.
     SGLANG_ENABLE_QWEN4_PLE_FUSION = EnvBool(True)
+    # Experimental, gfx950: run a Qwen4-Exp GDN layer's attention half (gated read, GDN mixer,
+    # gated write) as one FlyDSL launch (megakernel/basics/gdn_block.py) for TP1 decode at batch 1.
+    # Other shapes and phases keep the original path.
+    SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL = EnvBool(False)
     # --ple-offload-backend file: where the sparse, file-backed PLE table lives
     # (deterministic name, reused across restarts), whether prefill-sized
     # gathers hint the page cache first, and an escape hatch for the device

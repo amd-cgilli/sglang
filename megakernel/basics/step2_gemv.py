@@ -20,18 +20,18 @@ from flydsl.expr.typing import T
 
 import buffer_ops
 from common import CM_NT
-from gemv_op import K_STEP, NBLK, Smem, emit_gemv, row_balance, spans
+from gemv_op import K_STEP, NBLK, alloc_smem, emit_gemv, row_balance, spans
 from timeline import mark, new_trace, span_us, write_trace
 from skinny_bf16 import build_bf16_skinny_gemm_module
 
-X_TAG = 7  # x is written once by the host; y gets a fresh tag every launch
+X_TAG = 7  # arbitrary but nonzero: zeroed and out-of-bounds pairs read as tag 0, so 0 would match them
 LAUNCHES = 100
 ROTATE_BYTES = 3 * 224 << 20  # > 3x the 224 MB Infinity Cache, so every launch reads HBM
 SHAPES = {"in_proj": (16480, 2560), "out_proj": (2560, 6144)}  # GDN, Qwen3.8 TP1: (N, K)
 
 
 @functools.cache
-def build_gemv(N, K, waves, k_split, depth, traced, prefetch=True, mark0=0):
+def build_gemv(N, K, waves, k_split, depth, traced, prefetch=True, mark0=0, x_in_lds=False):
     """One launch running one GEMV op; step 3 also uses it as the one-launch-per-op baseline."""
     threads = waves * 64
 
@@ -41,9 +41,9 @@ def build_gemv(N, K, waves, k_split, depth, traced, prefetch=True, mark0=0):
         x_rs = buffer_ops.create_buffer_resource(x_mb, max_size=False, num_records_bytes=K * 4)
         w_rs = buffer_ops.create_buffer_resource(w, max_size=False, num_records_bytes=N * K * 2)
         y_rs = buffer_ops.create_buffer_resource(y_mb, max_size=False, num_records_bytes=N * 4)
-        partial = fx.SharedAllocator().allocate(Smem).peek().partial.ptr
+        partial, x_lds = alloc_smem(x_in_lds)
         emit_gemv(x_rs, w_rs, y_rs, partial, trace, x_tag, y_tag, N, K, waves, k_split, depth, prefetch,
-                  mark0, traced)
+                  mark0, traced, x_lds)
 
     @flyc.jit
     def launch(x_mb: fx.Tensor, w: fx.Tensor, y_mb: fx.Tensor, trace: fx.Tensor, x_tag: fx.Int32,

@@ -81,6 +81,7 @@ from sglang.srt.models.qwen3_5 import (
     Qwen3_5LinearDecoderLayer,
 )
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from sglang.srt.models import qwen4_exp_gdn_megakernel
 from sglang.srt.models.qwen4_exp_ple_table import (
     allocate_ple_host_table,
     make_ple_file_prefetcher,
@@ -1622,6 +1623,14 @@ class Qwen4ExpLinearDecoderLayer(
         **kwargs,
     ):
         forward_batch = kwargs.get("forward_batch", None)
+
+        if qwen4_exp_gdn_megakernel.eligible(self, hidden_states, forward_batch):
+            # SGLANG_OPT_USE_QWEN4_GDN_MEGAKERNEL: the attention half in one launch.
+            output = qwen4_exp_gdn_megakernel.forward_layer(
+                self, hidden_states, forward_batch
+            )
+            if output is not None:
+                return output
 
         hidden_states = self._prepare_attn_stage(
             hidden_states, forward_batch, kwargs.get("ple_batch")

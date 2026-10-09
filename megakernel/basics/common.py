@@ -101,3 +101,19 @@ def poll_pairs(rsrc, first_pairs, tag):
         _spin_pause()
         v = load_all()
     return [v[e] for e in range(0, 4 * len(first_pairs), 2)]
+
+
+@device
+def poll_pairs_first_then_rest(rsrc, groups, tag):
+    """poll_pairs over groups of chunks (one per token) that the same producers publish together:
+    spin on the first group only, then fetch the rest in one batch, which normally lands at once.
+    Spinning on all of them would reload every chunk on every retry, and 256 blocks doing that
+    starve the producers. Returns the value words per group."""
+    out = [poll_pairs(rsrc, groups[0], tag)]
+    rest = [p for g in groups[1:] for p in g]
+    words = poll_pairs(rsrc, rest, tag) if rest else []  # (no early return: the rewrite would drop it)
+    k = 0
+    for g in groups[1:]:
+        out.append(words[k: k + 2 * len(g)])
+        k += 2 * len(g)
+    return out
