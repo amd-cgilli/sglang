@@ -1027,6 +1027,9 @@ class Envs:
     SGLANG_AITER_INTREE_GEMM_TUNE = EnvBool(True)
     # TODO(aiter#6030): remove once ROCm/aiter#6030 is in the aiter pin
     SGLANG_AITER_INTREE_MHC_TILE_M16 = EnvBool(True)
+    # Qwen4-Exp decode-sized (<= 128 rows) HC sites on gfx950: the per-branch norm and the
+    # combine's inject GEMV fold into FlyDSL HC mix kernels; the combine becomes elementwise.
+    SGLANG_OPT_QWEN4_FUSED_HC = EnvBool(False)
     # Fuse MiniMax-M3 main/index QK norm + RoPE with main KV and index-K cache
     # insertion. Requires an AITER build with the fp8_e4m3_unit cache contract.
     # Enabled by default for supported configurations; set to 0 to disable.
