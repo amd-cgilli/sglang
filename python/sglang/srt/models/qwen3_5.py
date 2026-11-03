@@ -163,8 +163,11 @@ _is_cpu = is_cpu()
 _is_gfx95 = is_gfx95_supported()
 _is_hip = is_hip()
 _QWEN3_5_MOE_TEXT_MODEL_TYPES = ("qwen3_5_moe_text", "qwen4_exp_text")
-# qwen4_exp shares these classes, but the ROCm packed path is Qwen3.5-only.
-_QWEN3_5_ROCM_PACKED_MODEL_TYPES = ("qwen3_5_text", "qwen3_5_moe_text")
+_QWEN3_5_ROCM_PACKED_MODEL_TYPES = (
+    "qwen3_5_text",
+    "qwen3_5_moe_text",
+    "qwen4_exp_text",
+)
 _is_xpu = is_xpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 if _use_aiter:
@@ -766,7 +769,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             type(getattr(proj, "scheme", None)) is QuarkW8A8Fp8
             and proj.scheme.weight_qscheme == "per_channel"
             and proj.scheme.per_token
-            and proj.input_scale is None
+            and getattr(proj, "input_scale", None) is None
             and proj.bias is None
             and proj.weight.dtype == torch.float8_e4m3fn
             and proj.weight.is_cuda
@@ -838,11 +841,18 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             # AR+RMSNorm tuple; one aiter GEMM replaces the two separate
             # projections. Measured on MI355X the packed GEMM only pays off for
             # decode/verify-sized batches, so larger batches keep the separate
-            # projections below.
+            # projections below. Qwen4-Exp FP8 also wins up to MTP verify at
+            # bs 128 (512 rows).
             x = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+            max_rows = (
+                512
+                if self._fused_in_proj_scale is not None
+                and self.config.model_type == "qwen4_exp_text"
+                else 64
+            )
             if (
                 x.dtype == torch.bfloat16
-                and 0 < x.shape[0] <= 64
+                and 0 < x.shape[0] <= max_rows
                 and not torch.compiler.is_compiling()
             ):
                 if self._fused_in_proj_scale is not None:

@@ -2688,6 +2688,9 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         return loaded_params
 
+    def prepare_before_cuda_graph_capture(self, model_runner) -> None:
+        self.model.prepare_before_cuda_graph_capture(model_runner)
+
     def precompile_kernels_after_loading(self) -> None:
         from sglang.srt.layers.quantization.unquant import precompile_splitk_tactics
 
