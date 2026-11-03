@@ -1123,6 +1123,10 @@ class Envs:
     SGLANG_ROCM_SMALLM_ROUTER = EnvBool(True)
     SGLANG_ROCM_SMALLM_MOE = EnvBool(True)
     SGLANG_ROCM_SMALLM_FP8_PROJ = EnvBool(True)
+    # Qwen4-Exp QSA layers: per-token FP8-quantize hidden_states once and feed
+    # both qkv_proj and the indexer's index_qk_proj (Quark dynamic per-token
+    # FP8 activations, per-channel weights). Bit-exact.
+    SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT = EnvBool(False)
     # Quark MXFP4 dense linear on gfx95: use AITER's preshuffled ASM/CK FP4 GEMM
     # (shared a4w4 tuned CSVs) instead of the Triton gemm_afp4wfp4 path.
     SGLANG_ROCM_USE_AITER_FP4_ASM_GEMM = EnvBool(False)

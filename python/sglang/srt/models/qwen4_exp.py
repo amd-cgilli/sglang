@@ -15,6 +15,7 @@ import triton.language as tl
 from torch import nn
 
 from sglang.kernels.ops.elementwise.elementwise import fused_sigmoid_mul
+from sglang.kernels.ops.quantization.fp8_kernel import per_token_group_quant_fp8
 from sglang.srt.configs.qwen4_exp import Qwen4ExpConfig, Qwen4ExpTextConfig
 from sglang.srt.distributed import tensor_model_parallel_all_reduce
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
@@ -1841,6 +1842,21 @@ class Qwen4ExpAttentionDecoderLayer(
                 prefix=f"{prefix}.indexer" if prefix else "indexer",
                 rotary_emb=self.rotary_emb,
             )
+        # qkv_proj and indexer.index_qk_proj would each per-token quantize the
+        # same rows; with both Quark per-token FP8, quantize once and share.
+        self.share_attn_input_quant = (
+            self.is_qsa
+            and _use_aiter
+            and envs.SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT.get()
+            and all(
+                getattr(
+                    getattr(linear, "scheme", None),
+                    "accepts_per_token_fp8_tuple",
+                    False,
+                )
+                for linear in (self.qkv_proj, self.indexer.index_qk_proj)
+            )
+        )
         self._init_qwen4_exp_layer_extensions(config, layer_id, quant_config, prefix)
 
     def _compute_qsa_topk_indices(
@@ -1939,6 +1955,16 @@ class Qwen4ExpAttentionDecoderLayer(
             and hidden_states.shape[0] < _QSA_INDEXER_OVERLAP_TOKEN_THRESHOLD
         )
         attention_kwargs = {}
+        if (
+            self.share_attn_input_quant
+            and isinstance(hidden_states, torch.Tensor)
+            and not is_in_breakable_cuda_graph()
+            and not torch.compiler.is_compiling()
+        ):
+            # Same kernel and group as apply_fp8_linear's dynamic per-token quant.
+            hidden_states = per_token_group_quant_fp8(
+                hidden_states, group_size=hidden_states.shape[-1]
+            )
         if overlap_indexer:
             # Safe to overlap: the indexer reads only hidden_states/positions,
             # and writes QSA-private pool buffers.

@@ -52,6 +52,13 @@ def _qsa_prefill_row_chunk_size(rows: int, keys: int, heads: int) -> int:
     return min(rows, max_padded_rows)
 
 
+def _narrow_rows(hidden_states, rows: int):
+    """``hidden_states[:rows]``; also narrows a per-token (fp8, scale) pair."""
+    if isinstance(hidden_states, tuple):
+        return tuple(t[:rows] for t in hidden_states)
+    return hidden_states[:rows]
+
+
 class QSAIndexer(MultiPlatformOp):
     """Config-driven fused-QK, weight-free sparse-attention indexer."""
 
@@ -626,7 +633,7 @@ class QSAIndexer(MultiPlatformOp):
         local_sequence_ids = cp_shard_hidden_states(
             indexer_metadata.get_token_to_batch_idx(), forward_batch
         )[:num_local]
-        hidden_states = hidden_states[:num_local]
+        hidden_states = _narrow_rows(hidden_states, num_local)
         positions = (
             positions[:, :num_local] if positions.ndim == 2 else positions[:num_local]
         )
@@ -725,10 +732,13 @@ class QSAIndexer(MultiPlatformOp):
                 "QSA logical positions are shorter than the request mapping: "
                 f"positions={logical_positions.numel()}, mapping={num_valid_tokens}"
             )
-        if hidden_states.shape[0] < num_valid_tokens:
+        num_hidden_rows = (
+            hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+        ).shape[0]
+        if num_hidden_rows < num_valid_tokens:
             raise ValueError(
                 "QSA hidden states are shorter than the request mapping: "
-                f"hidden={hidden_states.shape[0]}, mapping={num_valid_tokens}"
+                f"hidden={num_hidden_rows}, mapping={num_valid_tokens}"
             )
         position_tokens = (
             positions.shape[-1] if positions.ndim == 2 else positions.numel()
@@ -740,7 +750,7 @@ class QSAIndexer(MultiPlatformOp):
             )
 
         logical_positions = logical_positions[:num_valid_tokens]
-        hidden_states = hidden_states[:num_valid_tokens]
+        hidden_states = _narrow_rows(hidden_states, num_valid_tokens)
         positions = (
             positions[:, :num_valid_tokens]
             if positions.ndim == 2

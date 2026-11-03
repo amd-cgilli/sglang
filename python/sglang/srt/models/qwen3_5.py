@@ -347,7 +347,13 @@ def _select_fused_ar_input_for_linear(hidden_states, linear: nn.Module):
         if _linear_accepts_fp8_tuple(linear):
             return (hs_fp8, hs_scale)
         return hs_bf16
-    if len(hidden_states) == 2 and _linear_accepts_fp8_tuple(linear):
+    if len(hidden_states) == 2 and (
+        _linear_accepts_fp8_tuple(linear)
+        # A per-token (fp8, scale) pair, e.g. Qwen4-Exp's shared QSA input quant.
+        or getattr(
+            getattr(linear, "scheme", None), "accepts_per_token_fp8_tuple", False
+        )
+    ):
         return hidden_states
     raise TypeError(
         f"{linear.__class__.__name__} cannot consume fused AR quant tuple input"
