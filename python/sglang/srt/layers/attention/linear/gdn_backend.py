@@ -29,6 +29,9 @@ from sglang.srt.layers.attention.linear.kda_prefill_graph import (
     KDAPrefillTrackRows,
     build_track_rows,
 )
+from sglang.srt.layers.attention.linear.kernels.gdn_aiter_prefill import (
+    aiter_gdn_prefill_conv,
+)
 from sglang.srt.layers.attention.linear.kernels.gdn_triton import TritonGDNKernel
 from sglang.srt.layers.attention.linear.utils import (
     LinearAttnBackends,
@@ -272,6 +275,14 @@ def _validate_gdn_linear_attn_backends(backends: LinearAttnBackends) -> None:
             "--enable-deterministic-inference. Use "
             "--linear-attn-prefill-backend triton."
         )
+
+
+def _aiter_prefill_conv_or_triton(*args, **kwargs):
+    # The AITER conv raises ValueError on shapes it does not cover.
+    try:
+        return aiter_gdn_prefill_conv()(*args, **kwargs)
+    except ValueError:
+        return causal_conv1d_fn(*args, **kwargs)
 
 
 class GDNKernelDispatcher:
@@ -1087,7 +1098,10 @@ class GDNAttnBackend(MambaAttnBackendBase):
     ) -> torch.Tensor:
         block_table = self.forward_metadata.conv_block_table
         conv_kwargs = {"block_table": block_table} if block_table is not None else {}
-        return causal_conv1d_fn(
+        conv_fn = causal_conv1d_fn
+        if block_table is None and aiter_gdn_prefill_conv() is not None:
+            conv_fn = _aiter_prefill_conv_or_triton
+        return conv_fn(
             mixed_qkv.transpose(0, 1),
             layer.conv_weights,
             layer.bias,

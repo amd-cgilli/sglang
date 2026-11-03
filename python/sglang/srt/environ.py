@@ -1125,6 +1125,13 @@ class Envs:
     # On gfx95x with SGLANG_USE_AITER=1, quantize the BF16 Qwen3.5/3.8 GDN
     # in_proj_qkvz and out_proj to MXFP4 after loading. 0 keeps them BF16.
     SGLANG_ROCM_GDN_ONLINE_MXFP4 = EnvBool(True)
+    # gfx95 GDN prefill through AITER FlyDSL kernels (needs SGLANG_USE_AITER=1 and an
+    # AITER that ships them; otherwise, and for unsupported batches, Triton runs):
+    # the causal conv, and the chunked delta rule as one fused kernel. Not bit-exact
+    # with Triton (bf16 rounding). Qwen3.8 MI355X TP1 serving: +4-6% throughput,
+    # GSM8K unchanged. Set to 0 to keep Triton.
+    SGLANG_AITER_GDN_CONV = EnvBool(True)
+    SGLANG_AITER_GDN_PREFILL = EnvBool(True)
     # ROCm decode attention kernel: auto (aiter_sparse on gfx950, tilelang elsewhere) |
     # aiter_sparse | tilelang | triton | torch | comparison | unified_kv_triton
     SGLANG_HACK_FLASHMLA_BACKEND = EnvStr("auto")

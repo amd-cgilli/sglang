@@ -1,5 +1,9 @@
 import torch
 
+from sglang.srt.layers.attention.linear.kernels.gdn_aiter_prefill import (
+    aiter_gdn_fused_prefill,
+    fill_track_state_from_h,
+)
 from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
     LinearAttnKernelBase,
 )
@@ -42,6 +46,12 @@ class TritonGDNKernel(LinearAttnKernelBase):
 
     supports_packed_decode: bool = not is_cpu() and not is_npu()
     supports_strided_target_verify_qkv: bool = True
+
+    def __init__(self):
+        # The AITER fused prefill writes the fp32 track snapshot in-kernel;
+        # batches it declines fill it from the Triton per-chunk states.
+        self._aiter_fused_prefill = aiter_gdn_fused_prefill()
+        self.supports_track_state_snapshot = self._aiter_fused_prefill is not None
 
     def packed_decode(
         self,
@@ -178,6 +188,8 @@ class TritonGDNKernel(LinearAttnKernelBase):
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         inplace_update: bool = True,
+        track_state: torch.Tensor | None = None,
+        track_chunk_idx: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple:
         recurrent_state = ssm_states
@@ -206,8 +218,25 @@ class TritonGDNKernel(LinearAttnKernelBase):
             # The external NPU kernel does not expose the optional write-back
             # control. Its existing behavior is equivalent to True.
             inplace_update_args = {}
+        elif self._aiter_fused_prefill is not None and inplace_update:
+            fused_fwd, fused_supported = self._aiter_fused_prefill
+            # Graph-captured prefill (chunk tables) reads the per-chunk h.
+            if not graph_table_args and fused_supported(q, k, v, g, beta, ssm_states):
+                o = fused_fwd(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    ssm_states=ssm_states,
+                    cache_indices=cache_indices,
+                    cu_seqlens=query_start_loc,
+                    track_state=track_state,
+                    track_chunk_idx=track_chunk_idx,
+                )
+                return o, None, None
 
-        return chunk_gated_delta_rule(
+        out = chunk_gated_delta_rule(
             q=q,
             k=k,
             v=v,
@@ -221,6 +250,11 @@ class TritonGDNKernel(LinearAttnKernelBase):
             **inplace_update_args,
             **graph_table_args,
         )
+        if track_state is not None:
+            fill_track_state_from_h(
+                out[2], track_state, track_chunk_idx, query_start_loc
+            )
+        return out
 
     def target_verify(
         self,
