@@ -539,6 +539,11 @@ def tilelang_qsa_mqa_prefill_relative(
 # CTAs per decode row: few enough levels to bound the TileLang specializations, and
 # a grid of about four waves (at least one CTA per row).
 _DECODE_CTAS_PER_ROW_LEVELS = (1, 16, 256)
+# CUDA MMA accepts an eight-wide N dimension, while ROCm MFMA requires sixteen;
+# the indexer pads Q to this in its fused prep so the wrapper need not copy it.
+QSA_DECODE_HEAD_ALIGNMENT = 16 if is_hip() else 8
+# Four wavefronts per CTA on ROCm: about 1.5x faster than 128 threads on MI355X.
+_DECODE_THREADS = 256 if is_hip() else 128
 
 
 @functools.lru_cache(maxsize=None)
@@ -593,10 +598,9 @@ def tilelang_qsa_mqa_decode(
         )
     if not q.shape[0] or not max_model_len:
         return logits
-    # CUDA MMA accepts an eight-wide N dimension, while ROCm MFMA requires
-    # sixteen. Zero-padding preserves the weight-free head sum on both paths.
+    # Zero-padding preserves the weight-free head sum.
     query_heads, head_dim = q.shape[1:]
-    head_alignment = 16 if is_hip() else 8
+    head_alignment = QSA_DECODE_HEAD_ALIGNMENT
     kernel_heads = max(
         head_alignment,
         ((query_heads + head_alignment - 1) // head_alignment) * head_alignment,
@@ -617,6 +621,7 @@ def tilelang_qsa_mqa_decode(
         page_size=page_size,
         ctas_per_row=_decode_ctas_per_row(q.shape[0], q.device),
         min_scored_len=min_scored_len,
+        threads=_DECODE_THREADS,
         dtype=_TILELANG_DTYPES[scoring_dtype],
     )(
         q_kernel.unsqueeze(1).contiguous(),
