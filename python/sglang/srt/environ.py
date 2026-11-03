@@ -664,6 +664,12 @@ class Envs:
     SGLANG_AITER_PAGED_PREFILL_ASM = EnvBool(True)
     # Bucket aiter paged_attention_ragged decode partitions by sequence length.
     SGLANG_AITER_DECODE_PARTITION_BUCKETS = EnvBool(True)
+    # Serve QSA decode/verify on gfx950 with the fused FlyDSL kernel in
+    # sglang.kernels.ops.attention.qsa_flydsl: it reads the selected KV straight
+    # from the pool (no gather pass) and splits each row across CTAs, where the
+    # Triton fallback runs one program per (row, kv head). Other GPUs ignore it.
+    # Kill switch, default on.
+    SGLANG_ENABLE_QSA_FLYDSL_DECODE = EnvBool(True)
     # size the KV pool after CUDA-graph capture
     SGLANG_ENABLE_POST_CAPTURE_KV_SIZING = EnvBool(False)
 
