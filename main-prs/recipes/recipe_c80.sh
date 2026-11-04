@@ -2,7 +2,7 @@
 # Qwen3.8-Flash-Next (amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8) on 1x MI355X (gfx950), TP1, AgentX agentic C80
 #
 # Software:
-#   SGLang : amd-cgilli/sglang branch qwen38-submission-v2 (upstream main + main-prs/ 05, 07, 08, 11, 13)
+#   SGLang : amd-cgilli/sglang branch qwen38-submission-v2 (upstream main + main-prs/ 05, 07, 08, 11, 13, 15)
 #   AITER  : ROCm/aiter 285579b62 (the commit SGLang's ROCm Dockerfile pins) + main-prs/ 03, 04 aiter.patch
 #            (main-prs/tools/apply.sh --aiter <aiter-dir> builds it)
 # Server params: perf/params/c80.sh (max-running 128, graph bs 128). Generated; flags deduplicated (params win).
@@ -21,6 +21,8 @@ export SGLANG_AITER_GDN_CONV=1
 export SGLANG_AITER_GDN_PREFILL=1
 # 08-fused-hc-decode (opt-in)
 export SGLANG_OPT_QWEN4_FUSED_HC=1
+# 15-hc-prefill-fusion (default on for HIP; explicit)
+export SGLANG_ENABLE_HC_COMBINE_NORM_FUSION=1
 # InferenceX AgentX pins MTP acceptance to the golden AL 2.32 (all vendors); drop the 3 SIMULATE vars for real verification
 export SGLANG_SIMULATE_ACC_LEN=2.32
 export SGLANG_SIMULATE_ACC_METHOD=match-expected

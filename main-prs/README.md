@@ -37,6 +37,9 @@ Median TTFT also drops (16k c80 19.7 -> 17.6 s, 16k c24 6.6 -> 5.8 s).
 GSM8K (1319, real MTP verification, C24 params): 96.88%, the same as bare v2 (96.88%). Mean accept length 3.09 vs 3.25 on bare v2,
 because 05's fused kernel attends the MTP drafted tail that upstream's HIP fallback drops at < 2051 valid tokens (see 05's meta.yaml).
 
+PR 15 (HC prefill fusion) was added after this measurement (gated against this stack, see its meta.yaml); the table above
+does not include it.
+
 ## Summary
 
 <!-- summary:begin -->
@@ -49,4 +52,5 @@ because 05's fused kernel attends the MTP drafted tail that upstream's HIP fallb
 | [08-fused-hc-decode](08-fused-hc-decode/) | [Perf] [AMD] Qwen4-Exp HC: fuse decode-sized hyper-connection norm and inject into FlyDSL mix | local | sglang: 4 files, +693 / -0 | t1 c24 +5.3% tput / +9.5% p90; 16k c24 +5.2% / +6.5% (both vs mean of 2 base runs); t1 c80 +0.6% / +2.5%; 16k c80 neutral (noisy, +3.0% / +3.1% on the rerun) (2026-11-03, MI355X TP1 HIP 2/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62 (pin) + PRs 03, 04 (stack 975b92d83)) | 99fd01047d / - |
 | [11-qsa-indexer-q-pad](11-qsa-indexer-q-pad/) | [Perf] [AMD] QSA: pad decode index Q to the ROCm MFMA width and use 256 threads | local | sglang: 2 files, +12 / -5 | t1 c24 +2.8% tput / +5.9% p90 (vs mean of 2 base runs); t1 c80 +2.6% / +1.5%; 16k c24 +0.5% / +0.7%; 16k c80 +0.2% / +0.2% (2026-11-03, MI355X TP1 HIP 2/0/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62 (pin) + PRs 03, 04 (stack 975b92d83)) | 99fd01047d / - |
 | [13-gdn-prefill-views](13-gdn-prefill-views/) | [Perf] [AMD] Qwen3.5 GDN: use zero-copy prefill projection views on HIP | local | sglang: 1 files, +1 / -1 | 16k c80 +6.0% tput / +7.2% p90 (vs mean of 2 base runs); t1 c24 +1.8% / +1.6%; t1 c80 +2.0% / +1.4%; 16k c24 +1.6% / +1.5% (2026-11-03, MI355X TP1 HIP 2/5, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62 (pin) + PRs 03, 04 (stack 975b92d83)) | 99fd01047d / - |
+| [15-hc-prefill-fusion](15-hc-prefill-fusion/) | [Perf] [AMD] Qwen4-Exp HC: fused prefill hc_combine kernel | local | sglang: 5 files, +399 / -9 | t1 c80 +2.4% tput / +4.7% p90 (vs mean of 2 base runs, base spread 2.3%); 16k c80 +3.7% / +3.7%; t1 c24 +0.4% / +0.2% (3 sequences pooled); 16k c24 +0.0% / +1.9% (2 sequences pooled). Kept by a small margin (gain ~2x noise); integrated on user request to track the HC prefill fusion (2026-11-04 09:28-10:20 UTC, MI355X TP1 HIP 5/4/0/2/6, A = v2 stack (sglang d8ff624648 = PRs 05, 07, 08, 11, 13; AITER 285579b62 + PRs 03, 04), B = A + this PR (e65d0985f8)) | 99fd01047d / - |
 <!-- summary:end -->
