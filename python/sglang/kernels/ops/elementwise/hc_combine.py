@@ -40,6 +40,7 @@ def _jit_hc_combine_module(
         cuda_files=["elementwise/hc_combine.cuh"],
         cuda_wrappers=[
             ("hc_combine", f"HcCombineKernel<{args}>::run"),
+            ("hc_combine_norm", f"HcCombineNormKernel<{args}>::run"),
             ("hc_combine_split", f"HcCombineSplitKernel<{args}>::run"),
         ],
     )
@@ -90,6 +91,43 @@ def hc_combine(
     module = _jit_hc_combine_module(hc_count, hidden_size, residual.dtype)
     module.hc_combine(y, r, n, inject_weight, out)
     return out.reshape(residual.shape)
+
+
+def hc_combine_norm(
+    block_output: torch.Tensor,
+    residual: torch.Tensor,
+    normed_residual: torch.Tensor,
+    inject_weight: torch.Tensor,
+    norm_weight: torch.Tensor,
+    hc_count: int,
+    hidden_size: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    ``hc_combine`` fused with the next sublayer's per-branch grouped Gemma RMSNorm.
+
+        out    = hc_combine(block_output, residual, normed_residual, inject_weight)
+        normed = grouped_gemma_rmsnorm(out, norm_weight, group_size=hidden_size, eps)
+
+    Parameters
+    ----------
+    norm_weight : CUDA tensor [hc_count * hidden_size], one weight slice per branch
+    eps         : RMSNorm epsilon
+
+    Other parameters match ``hc_combine``.
+
+    Returns
+    -------
+    (out, normed), each the same shape/dtype as residual.
+    """
+    y = block_output.reshape(-1, hidden_size)
+    r = residual.reshape(-1, hc_count * hidden_size)
+    n = normed_residual.reshape(-1, hc_count * hidden_size)
+    out = torch.empty_like(r)
+    normed = torch.empty_like(r)
+    module = _jit_hc_combine_module(hc_count, hidden_size, residual.dtype)
+    module.hc_combine_norm(y, r, n, inject_weight, norm_weight, out, normed, eps)
+    return out.reshape(residual.shape), normed.reshape(residual.shape)
 
 
 _SPLIT = 8

@@ -189,6 +189,248 @@ struct HcCombineKernel {
   }
 };
 
+struct HcCombineNormParams {
+  const void* block_output;     // [M, H]
+  const void* residual;         // [M, HC * H]
+  const void* normed_residual;  // [M, HC * H]
+  const void* inject_weight;    // [HC, HC * H]
+  const void* norm_weight;      // [HC * H], one Gemma weight slice per branch
+  void* output;                 // [M, HC * H]
+  void* normed_output;          // [M, HC * H]
+  float eps;
+};
+
+namespace hc_combine_norm_detail {
+
+// Sums kHcCount per-thread values across the CTA; every thread gets the totals.
+template <int64_t kHcCount, uint32_t kNumWarps>
+SGL_DEVICE void cta_reduce_sum(float (&vals)[kHcCount], float (&smem)[kHcCount][kNumWarps]) {
+  using namespace device;
+  const uint32_t warp_id = threadIdx.x / kWarpThreads;
+  const uint32_t lane = threadIdx.x % kWarpThreads;
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    vals[c] = warp::reduce_sum(vals[c]);
+  }
+  if (lane == 0) {
+#pragma unroll
+    for (int c = 0; c < kHcCount; ++c) {
+      smem[c][warp_id] = vals[c];
+    }
+  }
+  __syncthreads();
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    float total = 0.0f;
+#pragma unroll
+    for (uint32_t w = 0; w < kNumWarps; ++w) {
+      total += smem[c][w];
+    }
+    vals[c] = total;
+  }
+}
+
+}  // namespace hc_combine_norm_detail
+
+/**
+ * \brief hc_combine followed by the next sublayer's per-branch grouped Gemma RMSNorm:
+ *
+ *   output        = hc_combine(block_output, residual, normed_residual, inject_weight)
+ *   normed_output = grouped_gemma_rmsnorm(output, norm_weight, group_size=H, eps)
+ *
+ * Same one-CTA-per-row layout as hc_combine_kernel. The combined row stays in
+ * registers, so the norm skips re-reading it from HBM. The variance is taken over
+ * the bf16/fp16-rounded output, matching the unfused pair up to fp32 summation order.
+ */
+template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename Float>
+__global__ __launch_bounds__(256) void hc_combine_norm_kernel(const HcCombineNormParams __grid_constant__ params) {
+  using namespace device;
+  using namespace hc_combine_norm_detail;
+  using Float2 = packed_t<Float>;
+  using Storage = AlignedVector<Float2, 4>;  // 8 elements, 16 bytes
+  constexpr uint32_t kVecLen = 8;
+  constexpr uint32_t kNumThreads = 256;
+  constexpr int64_t kRowSize = kHcCount * kHiddenSize;
+  constexpr uint32_t kVecsPerRow = kRowSize / kVecLen;
+  constexpr uint32_t kVecsPerThread = kVecsPerRow / kNumThreads;
+  constexpr uint32_t kVecsPerBranch = kHiddenSize / kVecLen;
+  constexpr uint32_t kNumWarps = kNumThreads / kWarpThreads;
+
+  const auto gmem = tile::Memory<Storage>::cta(kNumThreads);
+  const uint32_t m = blockIdx.x;
+
+  const auto y_ptr = pointer::offset<Float>(params.block_output, static_cast<int64_t>(m) * kHiddenSize);
+  const auto r_ptr = pointer::offset<Float>(params.residual, static_cast<int64_t>(m) * kRowSize);
+  const auto n_ptr = pointer::offset<Float>(params.normed_residual, static_cast<int64_t>(m) * kRowSize);
+  const auto w_ptr = static_cast<const Float*>(params.inject_weight);
+  const auto nw_ptr = static_cast<const Float*>(params.norm_weight);
+  const auto out_ptr = pointer::offset<Float>(params.output, static_cast<int64_t>(m) * kRowSize);
+  const auto normed_ptr = pointer::offset<Float>(params.normed_output, static_cast<int64_t>(m) * kRowSize);
+
+  PDLWaitPrimary<kUsePDL>();
+
+  // Issue the residual and block_output loads up front so they overlap the gate reduction.
+  Storage n_vec[kVecsPerThread];
+  Storage r_vec[kVecsPerThread];
+  Storage y_vec[kVecsPerThread];
+#pragma unroll
+  for (uint32_t j = 0; j < kVecsPerThread; ++j) {
+    const uint32_t vec_idx = threadIdx.x + j * kNumThreads;
+    n_vec[j] = gmem.load(n_ptr, j);
+    r_vec[j] = gmem.load(r_ptr, j);
+    y_vec[j].load(y_ptr, vec_idx % kVecsPerBranch);
+  }
+
+  __shared__ float smem[kHcCount][kNumWarps];
+
+  // Gate values a_c = 2 * sigmoid(dot(normed_residual, inject_weight[c]) / HC).
+  float gate[kHcCount];
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    const auto wc_ptr = w_ptr + static_cast<int64_t>(c) * kRowSize;
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t j = 0; j < kVecsPerThread; ++j) {
+      const Storage w_vec = gmem.load(wc_ptr, j);
+#pragma unroll
+      for (uint32_t i = 0; i < kVecLen / 2; ++i) {
+        const auto [nx, ny] = cast<fp32x2_t>(n_vec[j][i]);
+        const auto [wx, wy] = cast<fp32x2_t>(w_vec[i]);
+        sum += nx * wx + ny * wy;
+      }
+    }
+    gate[c] = sum;
+  }
+  cta_reduce_sum<kHcCount, kNumWarps>(gate, smem);
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    gate[c] = 2.0f / (1.0f + math::exp(-gate[c] / kHcCount));
+  }
+
+  // Combine, store, and accumulate per-branch sums of squares of the rounded output.
+  // A thread's vectors can straddle branches, so select rather than index by branch.
+  float sum_of_squares[kHcCount];
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    sum_of_squares[c] = 0.0f;
+  }
+#pragma unroll
+  for (uint32_t j = 0; j < kVecsPerThread; ++j) {
+    const uint32_t branch = (threadIdx.x + j * kNumThreads) / kVecsPerBranch;
+    float a = gate[0];
+#pragma unroll
+    for (int c = 1; c < kHcCount; ++c) {
+      a = branch == static_cast<uint32_t>(c) ? gate[c] : a;
+    }
+    float sq = 0.0f;
+#pragma unroll
+    for (uint32_t i = 0; i < kVecLen / 2; ++i) {
+      const auto [rx, ry] = cast<fp32x2_t>(r_vec[j][i]);
+      const auto [yx, yy] = cast<fp32x2_t>(y_vec[j][i]);
+      r_vec[j][i] = cast<Float2>(fp32x2_t{rx + a * yx, ry + a * yy});
+      const auto [ox, oy] = cast<fp32x2_t>(r_vec[j][i]);
+      sq += ox * ox + oy * oy;
+    }
+    gmem.store(out_ptr, r_vec[j], j);
+#pragma unroll
+    for (int c = 0; c < kHcCount; ++c) {
+      sum_of_squares[c] += branch == static_cast<uint32_t>(c) ? sq : 0.0f;
+    }
+  }
+
+  // The gate reduction's smem reads must finish before it is reused.
+  __syncthreads();
+  cta_reduce_sum<kHcCount, kNumWarps>(sum_of_squares, smem);
+  float norm_factor[kHcCount];
+#pragma unroll
+  for (int c = 0; c < kHcCount; ++c) {
+    norm_factor[c] = math::rsqrt(sum_of_squares[c] / kHiddenSize + params.eps);
+  }
+
+#pragma unroll
+  for (uint32_t j = 0; j < kVecsPerThread; ++j) {
+    const uint32_t branch = (threadIdx.x + j * kNumThreads) / kVecsPerBranch;
+    float scale = norm_factor[0];
+#pragma unroll
+    for (int c = 1; c < kHcCount; ++c) {
+      scale = branch == static_cast<uint32_t>(c) ? norm_factor[c] : scale;
+    }
+    const Storage nw_vec = gmem.load(nw_ptr, j);
+    Storage normed_vec;
+#pragma unroll
+    for (uint32_t i = 0; i < kVecLen / 2; ++i) {
+      const auto [ox, oy] = cast<fp32x2_t>(r_vec[j][i]);
+      const auto [wx, wy] = cast<fp32x2_t>(nw_vec[i]);
+      normed_vec[i] = cast<Float2>(fp32x2_t{ox * scale * (1.0f + wx), oy * scale * (1.0f + wy)});
+    }
+    gmem.store(normed_ptr, normed_vec, j);
+  }
+
+  PDLTriggerSecondary<kUsePDL>();
+}
+
+template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename DType>
+struct HcCombineNormKernel {
+  static_assert(sizeof(DType) == 2, "HcCombineNorm only supports 2-byte dtypes");
+  static_assert(kHcCount > 0, "kHcCount must be positive");
+  static_assert(kHiddenSize > 0 && kHiddenSize % 8 == 0, "kHiddenSize must be a multiple of 8");
+  static_assert((kHcCount * kHiddenSize) % (256 * 8) == 0, "kHcCount * kHiddenSize must be a multiple of 2048");
+  static constexpr auto kernel = hc_combine_norm_kernel<kHcCount, kHiddenSize, kUsePDL, DType>;
+  static constexpr uint32_t kBlockSize = 256;
+
+  /**
+   * \brief Validate tensors and launch one CTA per token row.
+   * \param block_output    [M, H] contiguous
+   * \param residual        [M, HC * H] contiguous
+   * \param normed_residual [M, HC * H] contiguous, same dtype/device as residual
+   * \param inject_weight   [HC, HC * H] contiguous, same dtype/device as residual
+   * \param norm_weight     [HC * H] contiguous, same dtype/device as residual
+   * \param output          [M, HC * H] contiguous, same shape/dtype/device as residual
+   * \param normed_output   [M, HC * H] contiguous, same shape/dtype/device as residual
+   * \param eps             RMSNorm epsilon
+   */
+  static void
+  run(const tvm::ffi::TensorView block_output,
+      const tvm::ffi::TensorView residual,
+      const tvm::ffi::TensorView normed_residual,
+      const tvm::ffi::TensorView inject_weight,
+      const tvm::ffi::TensorView norm_weight,
+      const tvm::ffi::TensorView output,
+      const tvm::ffi::TensorView normed_output,
+      float eps) {
+    using namespace host;
+    auto M = SymbolicSize{"num_tokens"};
+    auto device = SymbolicDevice{};
+    device.set_options<kDLGPU>();
+
+    TensorMatcher({M, kHiddenSize}).with_dtype<DType>().with_device(device).verify(block_output);
+    TensorMatcher({M, kHcCount * kHiddenSize})
+        .with_dtype<DType>()
+        .with_device(device)
+        .verify(residual)
+        .verify(normed_residual)
+        .verify(output)
+        .verify(normed_output);
+    TensorMatcher({kHcCount, kHcCount * kHiddenSize}).with_dtype<DType>().with_device(device).verify(inject_weight);
+    TensorMatcher({kHcCount * kHiddenSize}).with_dtype<DType>().with_device(device).verify(norm_weight);
+
+    const auto params = HcCombineNormParams{
+        .block_output = block_output.data_ptr(),
+        .residual = residual.data_ptr(),
+        .normed_residual = normed_residual.data_ptr(),
+        .inject_weight = inject_weight.data_ptr(),
+        .norm_weight = norm_weight.data_ptr(),
+        .output = output.data_ptr(),
+        .normed_output = normed_output.data_ptr(),
+        .eps = eps,
+    };
+
+    const auto num_tokens = static_cast<uint32_t>(M.unwrap());
+    LaunchKernel(num_tokens, kBlockSize, device.unwrap())  //
+        .enable_pdl(kUsePDL)(kernel, params);
+  }
+};
+
 struct HcCombineSplitParams {
   const void* block_output;
   const void* residual;

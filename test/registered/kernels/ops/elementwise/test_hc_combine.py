@@ -2,7 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from sglang.kernels.ops.elementwise.hc_combine import hc_combine
+from sglang.kernels.ops.elementwise.hc_combine import hc_combine, hc_combine_norm
+from sglang.kernels.ops.layernorm.grouped_gemma_rmsnorm import grouped_gemma_rmsnorm
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=30, stage="base-b-kernel-unit", runner_config="1-gpu-large")
@@ -153,6 +154,83 @@ def test_hc_combine_bad_hidden_size():
             4,
             1000,
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("num_tokens", [1, 7, 128, 8192])
+def test_hc_combine_norm_matches_unfused(dtype, num_tokens):
+    block_output, residual, normed_residual, inject_weight = _make_inputs(
+        num_tokens, dtype
+    )
+    norm_weight = torch.randn(HC_COUNT * HIDDEN_SIZE, dtype=dtype, device="cuda") * 0.1
+    eps = 1e-6
+
+    out, normed = hc_combine_norm(
+        block_output,
+        residual,
+        normed_residual,
+        inject_weight,
+        norm_weight,
+        HC_COUNT,
+        HIDDEN_SIZE,
+        eps,
+    )
+    expected_out = hc_combine(
+        block_output, residual, normed_residual, inject_weight, HC_COUNT, HIDDEN_SIZE
+    )
+    expected_normed = grouped_gemma_rmsnorm(expected_out, norm_weight, HIDDEN_SIZE, eps)
+
+    # The combine half is the same arithmetic; only the norm's fp32 sum order differs.
+    torch.testing.assert_close(out, expected_out, rtol=0, atol=0)
+    torch.testing.assert_close(normed, expected_normed, **_TOLERANCES[dtype])
+
+
+def test_gated_residual_combine_and_normalize():
+    from sglang.srt.environ import envs
+    from sglang.srt.layers.hyperconnection import (
+        GatedResidual,
+        HyperConnectionConfig,
+    )
+
+    torch.manual_seed(0)
+    config = HyperConnectionConfig(
+        hc_count=HC_COUNT,
+        hidden_size=HIDDEN_SIZE,
+        hc_lowrank=320,
+        hc_per_branch_norm=True,
+    )
+    with envs.SGLANG_ENABLE_HC_COMBINE_NORM_FUSION.override(True):
+        attn_hc = GatedResidual(config).cuda().to(torch.bfloat16)
+        mlp_hc = GatedResidual(config).cuda().to(torch.bfloat16)
+    assert attn_hc._fused_combine_norm_ok
+    with torch.no_grad():
+        for param in [*attn_hc.parameters(), *mlp_hc.parameters()]:
+            param.normal_(0, 0.02)
+        hyper_input = torch.randn(
+            256, HC_COUNT * HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        )
+        block_output = torch.randn(
+            256, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        )
+        _, residuals = attn_hc.mix(hyper_input)
+
+        combined, combined_normed = attn_hc.combine_and_normalize(
+            block_output, residuals, mlp_hc.hc_norm
+        )
+        assert combined_normed is not None
+        mixed, (mix_input, mix_input_normed, _) = mlp_hc.mix(
+            combined, normalized_input=combined_normed
+        )
+
+        expected_combined = attn_hc.combine(block_output, residuals)
+        expected_mixed, (_, expected_normed, _) = mlp_hc.mix(expected_combined)
+
+    torch.testing.assert_close(combined, expected_combined, rtol=0, atol=0)
+    assert mix_input is combined
+    torch.testing.assert_close(
+        mix_input_normed, expected_normed, **_TOLERANCES[torch.bfloat16]
+    )
+    torch.testing.assert_close(mixed, expected_mixed, rtol=2e-2, atol=2e-2)
 
 
 if __name__ == "__main__":

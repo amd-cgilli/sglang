@@ -1030,6 +1030,9 @@ class Envs:
     # Qwen4-Exp decode-sized (<= 128 rows) HC sites on gfx950: the per-branch norm and the
     # combine's inject GEMV fold into FlyDSL HC mix kernels; the combine becomes elementwise.
     SGLANG_OPT_QWEN4_FUSED_HC = EnvBool(False)
+    # Qwen4-Exp HC sites outside SGLANG_OPT_QWEN4_FUSED_HC (prefill): fuse hc_combine with
+    # the next HC norm in one JIT kernel. Measured on gfx950 only: default ON for HIP.
+    SGLANG_ENABLE_HC_COMBINE_NORM_FUSION = EnvBool(_default_hip)
     # Fuse MiniMax-M3 main/index QK norm + RoPE with main KV and index-K cache
     # insertion. Requires an AITER build with the fp8_e4m3_unit cache contract.
     # Enabled by default for supported configurations; set to 0 to disable.
