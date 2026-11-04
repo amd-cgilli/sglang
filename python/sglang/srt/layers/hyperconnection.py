@@ -447,6 +447,7 @@ class GatedResidual(HyperConnectionBase):
             and next_norm is not None
             and next_norm.group_size == self.hidden_size
             and next_norm.weight.dtype == block_output.dtype
+            and next_norm.weight.numel() == self.hc_count * self.hidden_size
             and block_output.shape[0] > 0
             and self._jit_combine_eligible(block_output, residuals)
         ):
