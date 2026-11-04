@@ -17,7 +17,17 @@ export_repo() {  # <repo label> <git dir> <rev-range>
   git -C "$gdir" format-patch --stdout "$range" > "$DIR/$label.patch"
   read -r files ins del < <(git -C "$gdir" diff --shortstat "${range%%..*}" "${range##*..}" \
     | awk '{f=$1; i=0; d=0; for (k=1; k<=NF; k++) { if ($(k)~/insertion/) i=$(k-1); if ($(k)~/deletion/) d=$(k-1) } print f, i, d}')
-  local base; base=$(git -C "$gdir" rev-parse --short=10 "${range%%..*}")
+  # base = the upstream commit under the stack (main-prs/BASE; for AITER the pin SGLang's Dockerfile names at BASE),
+  # not the previous PR's commit. Falls back to the range start when that commit is not one of its ancestors.
+  local start=${range%%..*} up='' sgl_base base
+  sgl_base=$(cat "$PRS/BASE" 2>/dev/null || true)
+  if [[ $label == sglang ]]; then up=$sgl_base
+  elif [[ -n $sgl_base ]]; then
+    up=$(git -C "$PRS" show "$sgl_base:docker/rocm.Dockerfile" 2>/dev/null | grep -oE 'AITER_COMMIT_DEFAULT="[0-9a-f]+"' \
+      | grep -oE '[0-9a-f]{40}' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}' || true)
+  fi
+  if [[ -n $up ]] && git -C "$gdir" merge-base --is-ancestor "$up" "$start" 2>/dev/null; then start=$up; fi
+  base=$(git -C "$gdir" rev-parse --short=10 "$start")
   python3 - "$DIR/meta.yaml" "$label" "$files" "$ins" "$del" "$base" <<'PY'
 import sys, yaml
 path, label, files, ins, dele, base = sys.argv[1:]

@@ -1,0 +1,29 @@
+title: '[Perf] [AMD] Qwen4-Exp HC: fuse decode-sized hyper-connection norm and inject into FlyDSL mix'
+status: local
+description: 'On gfx950, behind SGLANG_OPT_QWEN4_FUSED_HC (default off), Qwen4-Exp HC sites with <= 128 rows fold
+  the per-branch Gemma RMSNorm
+
+  and the combine''s inject GEMV into a FlyDSL HC mix. The inject logits travel in the gate-partials slot, so the
+  combine becomes one
+
+  elementwise FlyDSL kernel that also returns the sums of squares the next mix reuses. Per site (K=10240, R=320)
+  mix + combine
+
+  33 -> 11 us at M=1, 45 -> 25 us at M=96. Rows > 128 (c80 verify) keep the unfused path.
+
+  '
+impact:
+  summary: t1 c24 +5.3% tput / +9.5% p90; 16k c24 +5.2% / +6.5% (both vs mean of 2 base runs); t1 c80 +0.6% / +2.5%;
+    16k c80 neutral (noisy, +3.0% / +3.1% on the rerun)
+  measured: 2026-11-03, MI355X TP1 HIP 2/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62
+    (pin) + PRs 03, 04 (stack 975b92d83)
+numerics: Not bit-exact (~1 bf16 ulp; rounding points move). GSM8K (real MTP) 96.58% (base 96.88%). Falls back bit-exact
+  at M > 128.
+env: SGLANG_OPT_QWEN4_FUSED_HC=1 (required; default off)
+changes:
+  sglang:
+    files: 4
+    insertions: 693
+    deletions: 0
+base:
+  sglang: 99fd01047d

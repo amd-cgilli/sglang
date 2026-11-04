@@ -1,0 +1,25 @@
+title: '[Perf] [AMD] Qwen3.5 GDN: use zero-copy prefill projection views on HIP'
+status: local
+description: 'Enables the existing strided prefill-view path (qwen3_5_gdn_prefill_projection_views) on ROCm for
+  plain prefill (extend), as CUDA does.
+
+  On HIP every consumer is a stride-aware kernel (causal conv1d, GDN gating, gated RMSNorm), so the q/k/v/z/b/a
+  split copy is dropped
+
+  (~0.36 ms per GDN layer per 16k chunk). One-line change, no flag.
+
+  '
+impact:
+  summary: 16k c80 +6.0% tput / +7.2% p90 (vs mean of 2 base runs); t1 c24 +1.8% / +1.6%; t1 c80 +2.0% / +1.4%;
+    16k c24 +1.6% / +1.5%
+  measured: 2026-11-03, MI355X TP1 HIP 2/5, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62
+    (pin) + PRs 03, 04 (stack 975b92d83)
+numerics: Bit-exact (conv output/state, gating g/beta, gated-norm output at Qwen3.8 shapes, 4 batch layouts).
+env: none
+changes:
+  sglang:
+    files: 1
+    insertions: 1
+    deletions: 1
+base:
+  sglang: 99fd01047d

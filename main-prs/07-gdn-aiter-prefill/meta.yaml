@@ -1,0 +1,29 @@
+title: '[Perf] [AMD] GDN: AITER FlyDSL prefill conv and fused chunked delta rule'
+status: local
+description: 'On gfx95 with SGLANG_USE_AITER=1, GDN prefill uses the AITER FlyDSL causal conv (SGLANG_AITER_GDN_CONV)
+  and one fused FlyDSL kernel
+
+  for the whole chunked delta rule (SGLANG_AITER_GDN_PREFILL); both default on and fall back to Triton.
+
+  The fused kernel writes the fp32 prefix-cache track snapshot itself (TritonGDNKernel.supports_track_state_snapshot);
+
+  declined batches and captured prefill graphs run Triton and fill the snapshot from h.
+
+  Needs AITER PRs 03 (conv) and 04 (fused prefill) on the pin; without them nothing changes.
+
+  '
+impact:
+  summary: t1 c24 +4.2% tput / +2.1% p90; t1 c80 +5.1% / +2.6%; 16k c24 +4.3% / +4.6%; 16k c80 +5.8% / +5.6% (with
+    AITER 03+04; B vs mean of 2 base runs)
+  measured: 2026-11-03, MI355X TP1 HIP 2/0/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62
+    (pin) + PRs 03, 04 (stack 975b92d83)
+numerics: 'Not bit-exact (bf16). GSM8K (real MTP) 96.58% (base 96.88%). Unit test: conv_states bit-exact, output/state/track
+  within 1e-2 rel L2 of Triton.'
+env: SGLANG_AITER_GDN_CONV=1 SGLANG_AITER_GDN_PREFILL=1 (default on; need AITER 03+04)
+changes:
+  sglang:
+    files: 5
+    insertions: 261
+    deletions: 2
+base:
+  sglang: 99fd01047d

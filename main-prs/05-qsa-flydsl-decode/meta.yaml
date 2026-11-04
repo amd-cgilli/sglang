@@ -1,0 +1,32 @@
+title: '[Perf] [AMD] QSA: fused FlyDSL sparse decode on gfx950'
+status: local
+description: 'Adds sglang.kernels.ops.attention.qsa_flydsl (FlyDSL attention + split reduce), registered as attention.flydsl_qsa_sparse_decode.
+
+  It reads the top-k KV straight from the pool through req_to_token (no gather pass, no packed scratch) and splits
+  each row across CTAs.
+
+  QwenSparseAttnBackend._forward_paged_attention calls it after the trtllm branch and before the HIP Triton gather
+  fallback.
+
+  SGLANG_ENABLE_QSA_FLYDSL_DECODE (Envs, default on) is the kill switch. Kernel 3.3-5.4x faster than gather+Triton
+  (Hkv2/g12/topk 2051).
+
+  Original kernel by Nikolai Protasov (fork 0c3cedfc32).
+
+  '
+impact:
+  summary: t1 c24 +4.6% tput / +7.3% p90; t1 c80 +0.7% / +7.2%; 16k c24 +6.2% / +6.7%; 16k c80 +6.4% / +7.0% (B
+    vs mean of 2 base runs)
+  measured: 2026-11-03, MI355X TP1 HIP 2/0/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62
+    (pin) + PRs 03, 04 (stack 975b92d83)
+numerics: Not bit-exact. GSM8K (real MTP) 96.65% (base 96.88%); 0.17% rel. error vs fp32 reference on real inputs
+  in all modes. Measured acceptance 3.03 vs 3.23 on GSM8K (the fused kernel attends the MTP drafted tail that upstream's
+  HIP fallback drops below 2051 valid tokens); ~equal at 10k context.
+env: SGLANG_ENABLE_QSA_FLYDSL_DECODE=1 (default on; 0 disables)
+changes:
+  sglang:
+    files: 12
+    insertions: 1260
+    deletions: 0
+base:
+  sglang: 99fd01047d

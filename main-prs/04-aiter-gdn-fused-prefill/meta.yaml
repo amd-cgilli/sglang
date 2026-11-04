@@ -1,0 +1,27 @@
+title: '[FlyDSL] AITER: single-kernel GDN fused chunked prefill for gfx950'
+status: local
+description: 'AITER patch on the pin 285579b62 (port of fork 9539fd39 as-is, author Nikolai Protasov).
+
+  One launch replaces the l2norm, prepare, chunk hidden-state and output stages (BT=64, K=V=128); the state stays
+  on chip,
+
+  the bf16 pool is updated in place, optional fp32 chunk-boundary snapshot for prefix caching.
+
+  API: gdn_fused_prefill_fwd + gdn_fused_prefill_supported (callers keep their multi-kernel path when it returns
+  False).
+
+  '
+impact:
+  summary: 'kernel only: 1.9-2.4x vs SGLang Triton chunk_gated_delta_rule at Qwen3.8 TP1 shapes (16k tokens 1694
+    -> 878 us); no standalone e2e gate, end-to-end effect is inside 07-gdn-aiter-prefill'
+  measured: 2026-11-03, gfx950, AITER pin 285579b62
+numerics: 'Not bit-exact. op_test passes vs fp32 token-by-token recurrence (rel L2 o 3.3e-3, state 2.9e-3, track
+  2.3e-3). GSM8K: see PR 07.'
+env: none (reached only through SGLang PR 07)
+changes:
+  aiter:
+    files: 4
+    insertions: 1319
+    deletions: 1
+base:
+  aiter: 285579b621

@@ -46,7 +46,7 @@ for p in "$tmp"/main-prs/[0-9]*/sglang.patch; do
   if git -C "$tmp/wt" apply --check -R "$p" 2>/dev/null; then
     echo "  $name: already in base (merged upstream) - skipped"; merged+=("$name"); continue
   fi
-  if ! git -C "$tmp/wt" am -q -3 "$p"; then
+  if ! git -C "$tmp/wt" am -q -3 --keep-non-patch "$p"; then
     git -C "$tmp/wt" am --abort || true
     echo "STOP: $name does not apply on $base; rebase it (fix in a worktree on this base, then export.sh)" >&2; exit 1
   fi
@@ -69,14 +69,25 @@ if [[ -n $aiter ]]; then
   pin=$(git -C "$REPO" show "$base:docker/rocm.Dockerfile" | grep -oE 'AITER_COMMIT_DEFAULT="[0-9a-f]+"' | grep -oE '[0-9a-f]{40}' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
   echo "aiter pin (most common AITER_COMMIT_DEFAULT): $pin"
   git -C "$aiter" cat-file -e "$pin^{commit}" 2>/dev/null || git -C "$aiter" fetch -q "$AITER_UPSTREAM" "$pin"
-  ((dry)) && { echo "dry run: aiter not touched"; exit 0; }
+  if ((dry)); then  # check the AITER patches in a throwaway worktree of the pin; <aiter-dir> is not touched
+    git -C "$aiter" worktree add -q --detach "$tmp/aiter" "$pin"
+    for p in "$PRS"/[0-9]*/aiter.patch; do
+      [[ -f $p ]] || continue
+      name=$(basename "$(dirname "$p")")
+      if git -C "$tmp/aiter" apply --check -R "$p" 2>/dev/null; then echo "  $name (aiter): already in pin - skipped"; continue; fi
+      git -C "$tmp/aiter" am -q -3 --keep-non-patch "$p" || { git -C "$tmp/aiter" am --abort || true; git -C "$aiter" worktree remove --force "$tmp/aiter"; echo "STOP: $name (aiter) does not apply on $pin" >&2; exit 1; }
+      echo "  $name (aiter): applies"
+    done
+    git -C "$aiter" worktree remove --force "$tmp/aiter"
+    echo "dry run: aiter patches apply; $aiter not touched"; exit 0
+  fi
   [[ -z $(git -C "$aiter" status --porcelain --untracked-files=no) ]] || { echo "aiter tree not clean" >&2; exit 1; }
   git -C "$aiter" checkout -q --detach "$pin"
   for p in "$PRS"/[0-9]*/aiter.patch; do
     [[ -f $p ]] || continue
     name=$(basename "$(dirname "$p")")
     if git -C "$aiter" apply --check -R "$p" 2>/dev/null; then echo "  $name (aiter): already in pin - skipped"; continue; fi
-    git -C "$aiter" am -q -3 "$p" || { git -C "$aiter" am --abort || true; echo "STOP: $name (aiter) does not apply on $pin" >&2; exit 1; }
+    git -C "$aiter" am -q -3 --keep-non-patch "$p" || { git -C "$aiter" am --abort || true; echo "STOP: $name (aiter) does not apply on $pin" >&2; exit 1; }
     echo "  $name (aiter): applied"
   done
   git -C "$aiter" submodule update --init 3rdparty/composable_kernel >/dev/null
