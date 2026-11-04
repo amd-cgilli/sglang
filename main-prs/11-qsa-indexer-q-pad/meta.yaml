@@ -1,19 +1,18 @@
 title: '[Perf] [AMD] QSA: pad decode index Q to the ROCm MFMA width and use 256 threads'
 status: local
-description: 'On ROCm the tilelang QSA decode MQA kernel needs query heads in multiples of 16; the indexer''s fused
-  Q prep padded to 8, so every
+description: 'On ROCm the tilelang QSA decode MQA kernel needs query heads in multiples of 16; the indexer''s fused Q prep padded to 8, so every
 
-  decode/verify/draft-extend call paid a torch.cat 8 -> 16. The prep now pads to QSA_DECODE_HEAD_ALIGNMENT and the
-  kernel launches with
+  decode/verify/draft-extend call paid a torch.cat 8 -> 16. The prep now pads to QSA_DECODE_HEAD_ALIGNMENT and the kernel launches with
 
   256 threads on ROCm (CUDA unchanged). Kernel ~1.5x faster (rows 320, ctx 16k: 132 -> 84 us).
 
   '
 impact:
-  summary: t1 c24 +2.8% tput / +5.9% p90 (vs mean of 2 base runs); t1 c80 +2.6% / +1.5%; 16k c24 +0.5% / +0.7%;
-    16k c80 +0.2% / +0.2%
-  measured: 2026-11-03, MI355X TP1 HIP 2/0/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62
-    (pin) + PRs 03, 04 (stack 975b92d83)
+  summary: t1 c24 +2.8% tput / +5.9% p90 (vs mean of 2 base runs); t1 c80 +2.6% / +1.5%; 16k c24 +0.5% / +0.7%; 16k c80 +0.2% / +0.2%
+  measured: 2026-11-03, MI355X TP1 HIP 2/0/5/7, sglang 99fd01047d (upstream main) + main-prs scaffold; AITER 285579b62 (pin) + PRs 03, 04 (stack
+    975b92d83)
+  stack: 'full stack (all kept PRs, AITER 03+04) vs bare v2, 2026-11-04: t1 c24 +20.5% tput / +28.2% p90; t1 c80 +16.4% / +20.9%; 16k c24 +20.0%
+    / +22.0%; 16k c80 +16.3% / +17.0% (see README)'
 numerics: Bit-exact (decode logits vs the old wrapper on 6 real shapes, bf16 and fp8).
 env: none (always on for HIP)
 changes:

@@ -18,6 +18,25 @@ Qwen3.8-Flash-Next on MI355X. AITER = the commit upstream SGLang bundles (`AITER
   (`--sync` fetches the latest main first; patches already upstream are skipped; stops at the first conflict).
 - `tools/summary.py`: regenerate the table below from the `meta.yaml` files.
 
+## Stack result
+
+Measured 2026-11-04 on one MI355X per test (TP1, NEXTN, acceptance pinned 2.32, `recipes/` C24/C80 server params), base -> stack -> base
+on the same GPU. A = bare v2: sglang upstream main 99fd01047d (+ main-prs scaffold e8f7aa0cc2) with AITER 285579b62 (the Dockerfile pin).
+B = this branch (code head 116d3c9710, PRs 05, 07, 08, 11, 13) with AITER 285579b62 + PRs 03, 04 (975b92d83) and the PRs' env.
+tput = total tok/s; P90 = P90 interactivity (tok/s/user; 64k-prefix multi-turn: rounds >= 2). Gain = B vs mean(A1, A2).
+
+| Test | GPU (HIP) | A1 / A2 tput | B tput | tput gain | A1 / A2 P90 | B P90 | P90 gain | A spread (tput / P90) |
+|---|---|---|---|---|---|---|---|---|
+| 64k-prefix multi-turn c24 | 2 | 79,124 / 79,349 | 95,450 | **+20.5%** | 61.36 / 62.52 | 79.41 | **+28.2%** | 0.28% / 1.87% |
+| 64k-prefix multi-turn c80 | 0 | 102,528 / 102,656 | 119,458 | **+16.4%** | 26.78 / 26.71 | 32.33 | **+20.9%** | 0.12% / 0.26% |
+| 16k/1k c24 | 5 | 17,926 / 18,000 | 21,559 | **+20.0%** | 47.84 / 47.85 | 58.37 | **+22.0%** | 0.42% / 0.02% |
+| 16k/1k c80 | 7 | 24,268 / 24,216 | 28,197 | **+16.3%** | 19.32 / 19.30 | 22.59 | **+17.0%** | 0.22% / 0.10% |
+
+The 64k c80 row is a rerun: the first sequence had a 4.1% A1-A2 P90 spread (+14.9% tput / +16.3% P90).
+Median TTFT also drops (16k c80 19.7 -> 17.6 s, 16k c24 6.6 -> 5.8 s).
+GSM8K (1319, real MTP verification, C24 params): 96.88%, the same as bare v2 (96.88%). Mean accept length 3.09 vs 3.25 on bare v2,
+because 05's fused kernel attends the MTP drafted tail that upstream's HIP fallback drops at < 2051 valid tokens (see 05's meta.yaml).
+
 ## Summary
 
 <!-- summary:begin -->

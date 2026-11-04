@@ -2,8 +2,7 @@ title: '[FlyDSL] AITER: varlen causal conv1d prefill kernel (causal_conv1d_fn co
 status: local
 description: 'AITER patch on the pin 285579b62. Adds causal_conv1d_prefill_flydsl_fn (aiter/ops/flydsl/kernels/causal_conv1d_prefill.py):
 
-  a FlyDSL varlen causal conv1d prefill with the Triton causal_conv1d_fn contract (one output, conv_states updated
-  in place),
+  a FlyDSL varlen causal conv1d prefill with the Triton causal_conv1d_fn contract (one output, conv_states updated in place),
 
   plus op_tests/test_causal_conv1d_prefill.py (Triton and FlyDSL vs an fp32 torch reference; conv_states bit-exact).
 
@@ -13,11 +12,12 @@ description: 'AITER patch on the pin 285579b62. Adds causal_conv1d_prefill_flyds
 
   '
 impact:
-  summary: 'kernel only: 1.27-1.72x vs Triton at D=10240 W=4 (16k tokens 315 -> 184 us); no standalone e2e gate,
-    end-to-end effect is inside 07-gdn-aiter-prefill'
+  summary: 'kernel only: 1.27-1.72x vs Triton at D=10240 W=4 (16k tokens 315 -> 184 us); no standalone e2e gate, end-to-end effect is inside 07-gdn-aiter-prefill'
   measured: 2026-11-03, gfx950, AITER pin 285579b62
-numerics: 'Not bit-exact with Triton (bf16). 0 elements outside rtol/atol 1e-2 vs fp32 reference on every shape;
-  conv_states writeback bit-exact. GSM8K: see PR 07.'
+  stack: 'full stack (all kept PRs, AITER 03+04) vs bare v2, 2026-11-04: t1 c24 +20.5% tput / +28.2% p90; t1 c80 +16.4% / +20.9%; 16k c24 +20.0%
+    / +22.0%; 16k c80 +16.3% / +17.0% (see README)'
+numerics: 'Not bit-exact with Triton (bf16). 0 elements outside rtol/atol 1e-2 vs fp32 reference on every shape; conv_states writeback bit-exact.
+  GSM8K: see PR 07.'
 env: none (reached only through SGLang PR 07)
 changes:
   aiter:
