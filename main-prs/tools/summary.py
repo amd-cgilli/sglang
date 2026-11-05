@@ -33,7 +33,7 @@ def _pr_state(url: str) -> str:
     return "merged" if j.get("merged_at") else "closed" if j["state"] == "closed" else "draft" if j.get("draft") else "open"
 
 
-TAIL = ("ranking", "pr_state", "related")  # kept at the end of meta.yaml (ranking: hand-set; the rest generated)
+TAIL = ("prs", "ranking", "pr_state", "related")  # kept at the end of meta.yaml (ranking: hand-set; the rest generated)
 
 
 def write_tail(f: pathlib.Path, meta: dict) -> None:

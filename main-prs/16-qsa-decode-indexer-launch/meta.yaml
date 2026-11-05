@@ -21,10 +21,14 @@ changes:
     deletions: 5
 base:
   sglang: 99fd01047d
+prs:
+  sglang: https://github.com/sgl-project/sglang/pull/48649
 ranking:
   p90_c24: 5.0
   tput_c24_k: 1.2
   noise: false
+pr_state:
+  sglang: draft
 related:
 - url: https://github.com/sgl-project/sglang/pull/48251
   relation: alternative
