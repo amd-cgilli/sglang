@@ -280,7 +280,7 @@ def _qwen3_5_stage_facts(
     )
 
 
-if _is_cuda:
+if _is_cuda or _is_hip:
     from sglang.kernels.ops.attention.fused_qk_rmsnorm_rope_gate import (
         fused_qk_gemma_rmsnorm_rope_gate,
     )
@@ -1483,6 +1483,10 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
 
     def forward_prepare_cuda_fused(self, positions, hidden_states):
         """Fused QK GemmaRMSNorm + NeoX RoPE + gate deinterleave."""
+        if _use_aiter and isinstance(hidden_states, tuple):
+            hidden_states = _select_fused_ar_input_for_linear(
+                hidden_states, self.qkv_proj
+            )
         qkv, _ = self.qkv_proj(hidden_states)
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -1505,7 +1509,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             has_gate=self.attn_output_gate,
             mrope_axis_map=(self.rotary_emb.axis_map if positions.dim() == 2 else None),
         )
-        seq_len = hidden_states.shape[0]
+        # qkv, not hidden_states: the latter may be an (fp8, scale) tuple.
+        seq_len = qkv.shape[0]
         q = q_out.view(seq_len, -1)
         k = k_out.view(seq_len, -1)
         gate = gate_out.view(seq_len, -1) if gate_out is not None else None
@@ -1615,12 +1620,12 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        if _is_cuda and self.attn_output_gate:
+        if (_is_cuda or _is_hip) and self.attn_output_gate:
             return self.forward_prepare_cuda_fused(
                 positions=positions,
                 hidden_states=hidden_states,
             )
-        if (_is_hip or _is_xpu or _is_cpu) and self.attn_output_gate:
+        if (_is_xpu or _is_cpu) and self.attn_output_gate:
             return self.forward_prepare_fused_gate(
                 positions=positions,
                 hidden_states=hidden_states,
