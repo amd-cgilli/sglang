@@ -1,0 +1,27 @@
+title: '[Perf] [AMD] Qwen4-Exp QSA: share the per-token FP8 quant of qkv_proj and index_qk_proj'
+status: local
+description: With SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1 a QSA layer per-token FP8-quantizes hidden_states once (same
+  kernel as apply_fp8_linear) and feeds the (fp8, scale) pair to qkv_proj and the indexer's index_qk_proj. Part
+  of the bundle 18-21.
+impact:
+  summary: alone +0.2% to +2.75% (2026-11-03 gates, ~15 us per QSA layer); part of the bundle 18-21, agentic C24
+    leave-one-out +2.9 P90 / +1.1k tput (within noise), see 19
+  measured: 2026-11-03 gates and 2026-11-05 agentic, MI355X TP1
+numerics: Bit-exact. GSM8K 96.35% (alone), 96.80% (D5 tree).
+env: SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1
+changes:
+  sglang:
+    files: 5
+    insertions: 63
+    deletions: 13
+base:
+  sglang: 99fd01047d
+ranking:
+  part_of: '19'
+related:
+- url: https://github.com/sgl-project/sglang/pull/34502
+  relation: alternative
+  state: open
+- url: https://github.com/sgl-project/sglang/pull/29723
+  relation: alternative
+  state: open

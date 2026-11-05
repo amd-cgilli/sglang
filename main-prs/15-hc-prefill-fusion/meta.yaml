@@ -36,3 +36,8 @@ changes:
     deletions: 9
 base:
   sglang: 99fd01047d
+ranking:
+  p90_c24: -1.7
+  tput_c24_k: -0.2
+  noise: true
+  note: removing 15 and C1 together costs 2.9 P90 (2 runs), so 15 stays

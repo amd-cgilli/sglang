@@ -1,0 +1,24 @@
+title: '[Config] AITER: gfx950 tuned GEMM configs for Qwen3.8-Flash-Next'
+status: local
+description: AITER patch on the pin 285579b62 (after 03, 04). Per-model a8w8 bpreshuffle and bf16 GEMM tables for
+  Qwen3.8-Flash-Next on gfx950, incl. the FlyDSL rows for the packed GDN in_proj (N=16512, K=2560) that 19 uses.
+  CSV only.
+impact:
+  summary: 'alone: +0.3% to +2.3% tput / P90 on the 2026-11-03 gates (below 4%); kept as part of the bundle 18-21,
+    agentic C24 leave-one-out +2.9 P90 / +1.1k tput (within noise), see 19'
+  measured: 2026-11-03 gates and 2026-11-05 agentic, MI355X TP1, AITER pin 285579b62
+numerics: Tuning only. GSM8K 96.50% (alone), 96.80% (D5 tree).
+env: none
+changes:
+  aiter:
+    files: 4
+    insertions: 418
+    deletions: 2
+base:
+  aiter: 285579b621
+ranking:
+  part_of: '19'
+related:
+- url: https://github.com/ROCm/aiter/pull/5870
+  relation: alternative
+  state: open

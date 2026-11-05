@@ -1,0 +1,81 @@
+From d4b16dafb50727d77daf50b6361b013f69c51a98 Mon Sep 17 00:00:00 2001
+From: Christian Gilli <272772515+amd-cgilli@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 16:51:58 +0000
+Subject: [PATCH] [Perf] [AMD] Qwen4-Exp: enable packed FP8 GDN in_proj on ROCm
+
+Add qwen4_exp_text to the ROCm packed GDN input-projection model types,
+forward prepare_before_cuda_graph_capture from
+Qwen4ExpForConditionalGeneration so the packing runs after the Quark FP8
+weights are processed, tolerate projections without an input_scale
+attribute, and keep the packed FP8 GEMM up to 512 rows (MTP verify at
+bs 128) for Qwen4-Exp.
+---
+ python/sglang/srt/models/qwen3_5.py   | 20 +++++++++++++++-----
+ python/sglang/srt/models/qwen4_exp.py |  3 +++
+ 2 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 8508c41b8e..e8caaa40bb 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -163,8 +163,11 @@ _is_cpu = is_cpu()
+ _is_gfx95 = is_gfx95_supported()
+ _is_hip = is_hip()
+ _QWEN3_5_MOE_TEXT_MODEL_TYPES = ("qwen3_5_moe_text", "qwen4_exp_text")
+-# qwen4_exp shares these classes, but the ROCm packed path is Qwen3.5-only.
+-_QWEN3_5_ROCM_PACKED_MODEL_TYPES = ("qwen3_5_text", "qwen3_5_moe_text")
++_QWEN3_5_ROCM_PACKED_MODEL_TYPES = (
++    "qwen3_5_text",
++    "qwen3_5_moe_text",
++    "qwen4_exp_text",
++)
+ _is_xpu = is_xpu()
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ if _use_aiter:
+@@ -766,7 +769,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             type(getattr(proj, "scheme", None)) is QuarkW8A8Fp8
+             and proj.scheme.weight_qscheme == "per_channel"
+             and proj.scheme.per_token
+-            and proj.input_scale is None
++            and getattr(proj, "input_scale", None) is None
+             and proj.bias is None
+             and proj.weight.dtype == torch.float8_e4m3fn
+             and proj.weight.is_cuda
+@@ -838,11 +841,18 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             # AR+RMSNorm tuple; one aiter GEMM replaces the two separate
+             # projections. Measured on MI355X the packed GEMM only pays off for
+             # decode/verify-sized batches, so larger batches keep the separate
+-            # projections below.
++            # projections below. Qwen4-Exp FP8 also wins up to MTP verify at
++            # bs 128 (512 rows).
+             x = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
++            max_rows = (
++                512
++                if self._fused_in_proj_scale is not None
++                and self.config.model_type == "qwen4_exp_text"
++                else 64
++            )
+             if (
+                 x.dtype == torch.bfloat16
+-                and 0 < x.shape[0] <= 64
++                and 0 < x.shape[0] <= max_rows
+                 and not torch.compiler.is_compiling()
+             ):
+                 if self._fused_in_proj_scale is not None:
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 21032db4c1..a6087858aa 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -2688,6 +2688,9 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
+ 
+         return loaded_params
+ 
++    def prepare_before_cuda_graph_capture(self, model_runner) -> None:
++        self.model.prepare_before_cuda_graph_capture(model_runner)
++
+     def precompile_kernels_after_loading(self) -> None:
+         from sglang.srt.layers.quantization.unquant import precompile_splitk_tactics
+ 
+-- 
+2.43.0
+

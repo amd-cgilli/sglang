@@ -22,3 +22,11 @@ changes:
     deletions: 5
 base:
   sglang: 99fd01047d
+ranking:
+  p90_c24: 3.1
+  tput_c24_k: 1.5
+  noise: true
+related:
+- url: https://github.com/ROCm/aiter/pull/5996
+  relation: alternative
+  state: open

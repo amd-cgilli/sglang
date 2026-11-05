@@ -28,3 +28,14 @@ changes:
     deletions: 0
 base:
   sglang: 99fd01047d
+ranking:
+  p90_c24: 6.7
+  tput_c24_k: 3.3
+  noise: false
+related:
+- url: https://github.com/sgl-project/sglang/pull/45196
+  relation: same change
+  state: open
+- url: https://github.com/ROCm/aiter/pull/5996
+  relation: alternative
+  state: open

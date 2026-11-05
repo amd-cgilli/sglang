@@ -26,3 +26,9 @@ changes:
     deletions: 0
 base:
   aiter: 285579b621
+ranking:
+  part_of: '07'
+related:
+- url: https://github.com/ROCm/aiter/pull/7028
+  relation: alternative
+  state: open

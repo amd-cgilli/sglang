@@ -1,0 +1,216 @@
+From 230b86ab6a2cdd92ced7a890aa7b2e56ac004dbb Mon Sep 17 00:00:00 2001
+From: Christian Gilli <272772515+amd-cgilli@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 16:54:55 +0000
+Subject: [PATCH] [Perf] [AMD] Qwen4-Exp QSA: share the per-token FP8 quant of
+ qkv_proj and index_qk_proj
+
+Both QSA attention projections are Quark W8A8 FP8 with dynamic per-token
+activations and per-channel weights, so each one per-token quantizes the
+same hidden_states. With SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1 the layer
+quantizes once (same kernel and group as apply_fp8_linear) and feeds the
+(fp8, scale) pair to both; bit-exact.
+
+The Quark W8A8 FP8 scheme accepts a per-token (fp8, scale) pair whenever it
+is dynamic per-token / per-channel, instead of only when the gfx950 smallm
+GEMM is enabled, and the QSA indexer narrows the pair to its valid rows.
+---
+ python/sglang/srt/environ.py                  |  4 +++
+ .../srt/layers/attention/qsa/qsa_indexer.py   | 18 ++++++++++---
+ .../quark/schemes/quark_w8a8_fp8.py           | 20 ++++++++------
+ python/sglang/srt/models/qwen3_5.py           |  8 +++++-
+ python/sglang/srt/models/qwen4_exp.py         | 26 +++++++++++++++++++
+ 5 files changed, 63 insertions(+), 13 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 9f9d802757..39fbc87199 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1123,6 +1123,10 @@ class Envs:
+     SGLANG_ROCM_SMALLM_ROUTER = EnvBool(True)
+     SGLANG_ROCM_SMALLM_MOE = EnvBool(True)
+     SGLANG_ROCM_SMALLM_FP8_PROJ = EnvBool(True)
++    # Qwen4-Exp QSA layers: per-token FP8-quantize hidden_states once and feed
++    # both qkv_proj and the indexer's index_qk_proj (Quark dynamic per-token
++    # FP8 activations, per-channel weights). Bit-exact.
++    SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT = EnvBool(False)
+     # Quark MXFP4 dense linear on gfx95: use AITER's preshuffled ASM/CK FP4 GEMM
+     # (shared a4w4 tuned CSVs) instead of the Triton gemm_afp4wfp4 path.
+     SGLANG_ROCM_USE_AITER_FP4_ASM_GEMM = EnvBool(False)
+diff --git a/python/sglang/srt/layers/attention/qsa/qsa_indexer.py b/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
+index 4638230313..86c75dae35 100644
+--- a/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
++++ b/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
+@@ -52,6 +52,13 @@ def _qsa_prefill_row_chunk_size(rows: int, keys: int, heads: int) -> int:
+     return min(rows, max_padded_rows)
+ 
+ 
++def _narrow_rows(hidden_states, rows: int):
++    """``hidden_states[:rows]``; also narrows a per-token (fp8, scale) pair."""
++    if isinstance(hidden_states, tuple):
++        return tuple(t[:rows] for t in hidden_states)
++    return hidden_states[:rows]
++
++
+ class QSAIndexer(MultiPlatformOp):
+     """Config-driven fused-QK, weight-free sparse-attention indexer."""
+ 
+@@ -626,7 +633,7 @@ class QSAIndexer(MultiPlatformOp):
+         local_sequence_ids = cp_shard_hidden_states(
+             indexer_metadata.get_token_to_batch_idx(), forward_batch
+         )[:num_local]
+-        hidden_states = hidden_states[:num_local]
++        hidden_states = _narrow_rows(hidden_states, num_local)
+         positions = (
+             positions[:, :num_local] if positions.ndim == 2 else positions[:num_local]
+         )
+@@ -725,10 +732,13 @@ class QSAIndexer(MultiPlatformOp):
+                 "QSA logical positions are shorter than the request mapping: "
+                 f"positions={logical_positions.numel()}, mapping={num_valid_tokens}"
+             )
+-        if hidden_states.shape[0] < num_valid_tokens:
++        num_hidden_rows = (
++            hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
++        ).shape[0]
++        if num_hidden_rows < num_valid_tokens:
+             raise ValueError(
+                 "QSA hidden states are shorter than the request mapping: "
+-                f"hidden={hidden_states.shape[0]}, mapping={num_valid_tokens}"
++                f"hidden={num_hidden_rows}, mapping={num_valid_tokens}"
+             )
+         position_tokens = (
+             positions.shape[-1] if positions.ndim == 2 else positions.numel()
+@@ -740,7 +750,7 @@ class QSAIndexer(MultiPlatformOp):
+             )
+ 
+         logical_positions = logical_positions[:num_valid_tokens]
+-        hidden_states = hidden_states[:num_valid_tokens]
++        hidden_states = _narrow_rows(hidden_states, num_valid_tokens)
+         positions = (
+             positions[:, :num_valid_tokens]
+             if positions.ndim == 2
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w8a8_fp8.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w8a8_fp8.py
+index eb0d05aeb0..4e28fb80ea 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w8a8_fp8.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w8a8_fp8.py
+@@ -29,8 +29,6 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ if _use_aiter:
+     from aiter.ops.shuffle import shuffle_weight
+ 
+-    from sglang.kernels.ops.gemm.smallm_fp8_gfx950 import smallm_fp8_gemm_enabled
+-
+ 
+ class QuarkW8A8Fp8(QuarkLinearScheme):
+     def __init__(
+@@ -48,6 +46,11 @@ class QuarkW8A8Fp8(QuarkLinearScheme):
+             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
+         )
+         self.out_dtype = torch.get_default_dtype()
++        # A producer may hand this scheme a pre-quantized per-token (fp8, scale
++        # [M, 1]) pair; apply_fp8_linear then skips its own per-token quant.
++        self.accepts_per_token_fp8_tuple = (
++            self.per_token and self.weight_qscheme == "per_channel"
++        )
+ 
+     @classmethod
+     def get_min_capability(cls) -> int:
+@@ -194,15 +197,15 @@ class QuarkW8A8Fp8(QuarkLinearScheme):
+         # Activations must be a plain bf16 tensor: per-channel FP8 (weight_scale
+         # [N, 1]) is gated off the aiter fused RMSNorm+quant kernel upstream by
+         # _is_block_scale_fp8, so the per-token quant happens in apply_fp8_linear.
+-        # The one exception is the per-token (fp8, scale [M, 1]) pair that the
+-        # Qwen3.5 SGLANG_ROCM_SMALLM_FP8_PROJ producers send on gfx950.
++        # The one exception is a per-token (fp8, scale [M, 1]) pair, e.g. from
++        # the Qwen3.5 SGLANG_ROCM_SMALLM_FP8_PROJ producers or the Qwen4-Exp
++        # shared attention-input quant.
+         input_scale = layer.input_scale
+-        if isinstance(x, tuple) and _use_aiter and smallm_fp8_gemm_enabled():
++        if isinstance(x, tuple) and self.accepts_per_token_fp8_tuple:
+             x, input_scale = x
+             assert (
+-                self.per_token
+-                and layer.weight_scale is not None
+-                and x.dtype == torch.float8_e4m3fn
++                layer.weight_scale is not None
++                and x.dtype == layer.weight.dtype
+                 and input_scale.dtype == torch.float32
+                 and input_scale.numel() == x.shape[0]
+             ), "quark W8A8 FP8 only accepts a per-token (fp8, scale) tuple"
+@@ -224,4 +227,5 @@ class QuarkW8A8Fp8(QuarkLinearScheme):
+             bias=bias,
+             cutlass_fp8_supported=self.cutlass_fp8_supported,
+             use_per_token_if_dynamic=self.per_token,
++            pre_quant_output_dtype=self.out_dtype,
+         )
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index e8caaa40bb..fe190b456c 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -347,7 +347,13 @@ def _select_fused_ar_input_for_linear(hidden_states, linear: nn.Module):
+         if _linear_accepts_fp8_tuple(linear):
+             return (hs_fp8, hs_scale)
+         return hs_bf16
+-    if len(hidden_states) == 2 and _linear_accepts_fp8_tuple(linear):
++    if len(hidden_states) == 2 and (
++        _linear_accepts_fp8_tuple(linear)
++        # A per-token (fp8, scale) pair, e.g. Qwen4-Exp's shared QSA input quant.
++        or getattr(
++            getattr(linear, "scheme", None), "accepts_per_token_fp8_tuple", False
++        )
++    ):
+         return hidden_states
+     raise TypeError(
+         f"{linear.__class__.__name__} cannot consume fused AR quant tuple input"
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index a6087858aa..4bc1dde5dd 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -15,6 +15,7 @@ import triton.language as tl
+ from torch import nn
+ 
+ from sglang.kernels.ops.elementwise.elementwise import fused_sigmoid_mul
++from sglang.kernels.ops.quantization.fp8_kernel import per_token_group_quant_fp8
+ from sglang.srt.configs.qwen4_exp import Qwen4ExpConfig, Qwen4ExpTextConfig
+ from sglang.srt.distributed import tensor_model_parallel_all_reduce
+ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+@@ -1841,6 +1842,21 @@ class Qwen4ExpAttentionDecoderLayer(
+                 prefix=f"{prefix}.indexer" if prefix else "indexer",
+                 rotary_emb=self.rotary_emb,
+             )
++        # qkv_proj and indexer.index_qk_proj would each per-token quantize the
++        # same rows; with both Quark per-token FP8, quantize once and share.
++        self.share_attn_input_quant = (
++            self.is_qsa
++            and _use_aiter
++            and envs.SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT.get()
++            and all(
++                getattr(
++                    getattr(linear, "scheme", None),
++                    "accepts_per_token_fp8_tuple",
++                    False,
++                )
++                for linear in (self.qkv_proj, self.indexer.index_qk_proj)
++            )
++        )
+         self._init_qwen4_exp_layer_extensions(config, layer_id, quant_config, prefix)
+ 
+     def _compute_qsa_topk_indices(
+@@ -1939,6 +1955,16 @@ class Qwen4ExpAttentionDecoderLayer(
+             and hidden_states.shape[0] < _QSA_INDEXER_OVERLAP_TOKEN_THRESHOLD
+         )
+         attention_kwargs = {}
++        if (
++            self.share_attn_input_quant
++            and isinstance(hidden_states, torch.Tensor)
++            and not is_in_breakable_cuda_graph()
++            and not torch.compiler.is_compiling()
++        ):
++            # Same kernel and group as apply_fp8_linear's dynamic per-token quant.
++            hidden_states = per_token_group_quant_fp8(
++                hidden_states, group_size=hidden_states.shape[-1]
++            )
+         if overlap_indexer:
+             # Safe to overlap: the indexer reads only hidden_states/positions,
+             # and writes QSA-private pool buffers.
+-- 
+2.43.0
+

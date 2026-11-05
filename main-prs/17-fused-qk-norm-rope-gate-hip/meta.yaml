@@ -1,0 +1,38 @@
+title: '[Perf] [AMD] Qwen3.5: use the fused QK GemmaRMSNorm + RoPE + gate kernel on HIP'
+status: local
+ported_from: 131236277f (amd-nprotaso/sglang qwen_3_8_improvement, Chang Liu; kernel-enablement half), reverted
+  there in 30d048aa25 (Nikolai Protasov)
+description: 'Routes HIP attention layers with an output gate (Qwen4-Exp target layers and the MTP draft) to forward_prepare_cuda_fused,
+  the existing Triton fused_qk_gemma_rmsnorm_rope_gate kernel, instead of the unfused norm + RoPE path (on the 1-D-position
+  draft path: mrope forward_native torch ops). _pdl_supported() returns False on HIP; forward_prepare_cuda_fused
+  unpacks the fused-allreduce (fp8, scale) tuple like forward_prepare_fused_gate. The fork commit''s cos_sin_cache
+  part is not needed (upstream keeps it fp32 on HIP). 2 files, no flag.'
+impact:
+  summary: 'agentic C24 add-one: +3.7 P90 / +1.9k tput on V2 AITER (87.7 / 124.1k vs FULL mean 84.0 / 122.2k, single
+    run), +3.4 P90 on the fork AITER pair (88.9 vs 85.5, 2 runs each); C48 +0.8 / +0.6%, C80 -0.0 / +0.1% (neutral)'
+  measured: 2026-11-04/05, MI355X TP1, AgentX agentic 3600 s, acceptance 2.32; A = 4772396f44 + 06/09/10 + C1 +
+    16, B = A + this; AITER 285579b62 + 03, 04, 01 (runs/agentic_blue_F{1,2,3}_D5_v2aiter_c*, E3/E4/E5 D2 runs)
+  unit: 'tools_forkvsv2/unit_d1_qkropegate.py PASS: draft T=24 graph 66.9 -> 2.4 us, T=96 verify 7.6 -> 3.5 us,
+    16k prefill 553 -> 521 us per layer'
+numerics: 'Within 1 bf16 ulp of the unfused path: 2-D (target) positions bit-exact except 1 element, 1-D (draft)
+  <=1 ulp in ~9% of q elements, gate exact. GSM8K (real MTP, 1314 scored) 96.80% (D5 tree; v2 stack 96.88%).'
+env: none (HIP with attn_output_gate)
+changes:
+  sglang:
+    files: 2
+    insertions: 11
+    deletions: 5
+base:
+  sglang: 99fd01047d
+ranking:
+  p90_c24: 3.7
+  tput_c24_k: 1.9
+  noise: true
+  note: add-one on the full stack (not leave-one-out), single run (~2 sd); +3.4 on the fork AITER pair
+related:
+- url: https://github.com/sgl-project/sglang/pull/45529
+  relation: same change
+  state: open
+- url: https://github.com/sgl-project/sglang/pull/47779
+  relation: follow-up
+  state: draft

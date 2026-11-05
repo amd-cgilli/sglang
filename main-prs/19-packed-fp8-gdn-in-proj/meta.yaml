@@ -1,0 +1,33 @@
+title: '[Perf] [AMD] Qwen4-Exp: enable packed FP8 GDN in_proj on ROCm'
+status: local
+description: Packs the Quark FP8 in_proj_qkvz + in_proj_ba into one N=16512 GEMM for qwen4_exp_text on ROCm (packing
+  after the Quark weights are processed; packed GEMM up to 512 rows for MTP verify at bs 128). Uses 18's tuned rows.
+  Row of the bundle 18-21 (AITER tunes, packed in_proj, lm_head GEMM, shared attn quant), measured together.
+impact:
+  summary: 'bundle 18-21 agentic C24 leave-one-out: +2.9 P90 (1.5 sd, within noise) / +1.1k tput (+0.9%); 64k-prefix
+    multi-turn on the stack + 15: c48 +8.4% tput / +4.2% P90, c80 +4.5% / +0.9% (2 sequences); alone (with 18) +0.05%
+    to +1.8% tput, +1.1% to +3.0% P90'
+  measured: 2026-11-04/05, MI355X TP1; agentic arm runs/agentic_loo_Lnobundle_c24 (HIP 4) vs FULL L0/L0b (HIP 7),
+    AITER 285579b62 + 03, 04 (+ 01 in FULL)
+numerics: Bit-exact. GSM8K 96.27% (alone), 96.80% (D5 tree).
+env: none
+changes:
+  sglang:
+    files: 2
+    insertions: 18
+    deletions: 5
+base:
+  sglang: 99fd01047d
+ranking:
+  p90_c24: 2.9
+  tput_c24_k: 1.1
+  noise: true
+  requires:
+  - '18'
+  - '20'
+  - '21'
+  note: bundle 18-21 measured together
+related:
+- url: https://github.com/sgl-project/sglang/pull/39912
+  relation: alternative
+  state: draft

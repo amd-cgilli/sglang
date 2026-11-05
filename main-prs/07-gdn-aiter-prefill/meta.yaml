@@ -28,3 +28,23 @@ changes:
     deletions: 2
 base:
   sglang: 99fd01047d
+ranking:
+  p90_c24: 2.6
+  tput_c24_k: 0.9
+  noise: true
+  requires:
+  - '03'
+  - '04'
+related:
+- url: https://github.com/sgl-project/sglang/pull/44103
+  relation: same change
+  state: open
+- url: https://github.com/sgl-project/sglang/pull/41879
+  relation: same change
+  state: open
+- url: https://github.com/ROCm/aiter/pull/6496
+  relation: prerequisite
+  state: open
+- url: https://github.com/sgl-project/sglang/pull/39595
+  relation: alternative
+  state: open

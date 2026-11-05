@@ -1,0 +1,23 @@
+title: '[Perf] [AMD] lm_head: Opt-in aiter tgemm for the bf16 lm_head on gfx950'
+status: local
+description: Opt-in (SGLANG_OPT_AITER_LM_HEAD_GEMM) AITER tgemm for the bf16 lm_head on gfx950, so tuned rows apply
+  instead of hipBLASLt's heuristic. Same change as our open PR sglang#47485. Part of the bundle 18-21.
+prs:
+  sglang: https://github.com/sgl-project/sglang/pull/47485
+impact:
+  summary: alone -1.1% to +1.75% (2026-11-03 gates); part of the bundle 18-21, agentic C24 leave-one-out +2.9 P90
+    / +1.1k tput (within noise), see 19
+  measured: 2026-11-03 gates and 2026-11-05 agentic, MI355X TP1
+numerics: GSM8K 96.73% (alone), 96.80% (D5 tree).
+env: SGLANG_OPT_AITER_LM_HEAD_GEMM=1
+changes:
+  sglang:
+    files: 2
+    insertions: 8
+    deletions: 1
+base:
+  sglang: 99fd01047d
+ranking:
+  part_of: '19'
+pr_state:
+  sglang: open
