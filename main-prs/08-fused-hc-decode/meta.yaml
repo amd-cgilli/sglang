@@ -32,7 +32,7 @@ ranking:
   tput_c24_k: 4.9
   noise: false
 pr_state:
-  sglang: draft
+  sglang: open
 related:
 - url: https://github.com/sgl-project/sglang/pull/46881
   relation: alternative

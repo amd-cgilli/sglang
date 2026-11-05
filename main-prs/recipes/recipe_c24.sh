@@ -27,6 +27,7 @@ export SGLANG_ENABLE_HC_COMBINE_NORM_FUSION=1
 export SGLANG_OPT_AITER_LM_HEAD_GEMM=1
 # 21-shared-attn-fp8-quant (opt-in)
 export SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1
+# 22-prefill-breakable-graph-rocm (default on for HIP; no env)
 # InferenceX AgentX pins MTP acceptance to the golden AL 2.32 (all vendors); drop the 3 SIMULATE vars for real verification
 export SGLANG_SIMULATE_ACC_LEN=2.32
 export SGLANG_SIMULATE_ACC_METHOD=match-expected
@@ -67,7 +68,7 @@ python -m sglang.launch_server \
   --speculative-draft-kv-cache-dtype fp8_e4m3 \
   --max-mamba-cache-size 960 \
   --mamba-radix-cache-strategy extra_buffer_lazy \
-  --mamba-track-interval 256 \
+  --mamba-track-interval 262144 \
   --enable-hierarchical-cache \
   --hicache-size 200 \
   --hicache-io-backend kernel \

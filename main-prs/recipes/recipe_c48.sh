@@ -27,6 +27,7 @@ export SGLANG_ENABLE_HC_COMBINE_NORM_FUSION=1
 export SGLANG_OPT_AITER_LM_HEAD_GEMM=1
 # 21-shared-attn-fp8-quant (opt-in)
 export SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1
+# 22-prefill-breakable-graph-rocm (default on for HIP; no env)
 # InferenceX AgentX pins MTP acceptance to the golden AL 2.32 (all vendors); drop the 3 SIMULATE vars for real verification
 export SGLANG_SIMULATE_ACC_LEN=2.32
 export SGLANG_SIMULATE_ACC_METHOD=match-expected
@@ -72,7 +73,7 @@ python -m sglang.launch_server \
   --hicache-mem-layout page_first \
   --hicache-write-policy write_back \
   --mamba-radix-cache-strategy extra_buffer_lazy \
-  --mamba-track-interval 256
+  --mamba-track-interval 262144
 
 # Client (InferenceX inferencex-e2e AgentX replay, as in the official runs):
 #   agentx profile --url http://127.0.0.1:${PORT:-8000} --model qwen3.8-flash-next --tokenizer amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8 \
