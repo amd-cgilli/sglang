@@ -117,10 +117,10 @@ class PhaseConfig:
 
 
 def default_prefill_backend() -> str:
-    """Enable BCG by default on CUDA and ROCm; other platforms remain opt-in."""
-    from sglang.srt.utils import is_cuda, is_hip
+    """Enable BCG by default on CUDA; other platforms remain opt-in."""
+    from sglang.srt.utils import is_cuda
 
-    return Backend.BREAKABLE if is_cuda() or is_hip() else Backend.DISABLED
+    return Backend.BREAKABLE if is_cuda() else Backend.DISABLED
 
 
 def with_phase(config: "CudaGraphConfig", phase: str, **changes) -> "CudaGraphConfig":
