@@ -27,12 +27,18 @@ export SGLANG_ENABLE_HC_COMBINE_NORM_FUSION=1
 export SGLANG_OPT_AITER_LM_HEAD_GEMM=1
 # 21-shared-attn-fp8-quant (opt-in)
 export SGLANG_OPT_QWEN4_SHARED_ATTN_QUANT=1
-# 22-prefill-breakable-graph-rocm (default on for HIP; no env)
 # InferenceX AgentX pins MTP acceptance to the golden AL 2.32 (all vendors); drop the 3 SIMULATE vars for real verification
 export SGLANG_SIMULATE_ACC_LEN=2.32
 export SGLANG_SIMULATE_ACC_METHOD=match-expected
 export SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token
 
+# Launch flags beyond the PRs (measured; see README "Launch flags"):
+#   --cuda-graph-backend-prefill breakable: prefill runs as CUDA graphs (default on CUDA, off on ROCm).
+#     Gate (64k-prefix multi-turn, 16k cold) +6.5..+8.4% tput; agentic C12 +2.3% P90 / +1.5% tput, C80 +1.6% / +4.0%.
+#     Costs a ~17-20 GB graph pool and ~45 s of startup; the KV pool is unchanged.
+#   --mamba-track-interval 262144: no Mamba state checkpoints during decode (AgentX never re-sends model output),
+#     so the cache keeps prompt prefixes on the GPU instead of spilling them to HiCache. Gate 64k-prefix multi-turn
+#     c24 +5.1% tput / +8.4% P90, c80 +7.8% / +19.5%; agentic C80 +8.3% tput / +13.6% P90, C12 neutral.
 python -m sglang.launch_server \
   --host 0.0.0.0 --port ${PORT:-8000} \
   --model-path amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8 \
@@ -69,6 +75,7 @@ python -m sglang.launch_server \
   --max-mamba-cache-size 960 \
   --mamba-radix-cache-strategy extra_buffer_lazy \
   --mamba-track-interval 262144 \
+  --cuda-graph-backend-prefill breakable \
   --enable-hierarchical-cache \
   --hicache-size 200 \
   --hicache-io-backend kernel \

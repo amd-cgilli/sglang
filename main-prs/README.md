@@ -11,7 +11,8 @@ Qwen3.8-Flash-Next on MI355X. AITER = the commit upstream SGLang bundles (`AITER
     base commits), changes per repo (files / insertions / deletions, generated), base commits (generated).
   - `sglang.patch` and/or `aiter.patch`: `git format-patch` mbox of the PR's commits (generated).
 - `BASE`: the upstream main commit the branch was last rebuilt on.
-- `recipes/recipe_cN.sh`: the exact server command (env + flags) for AgentX C12/C24/C48/C80 with every PR here.
+- `recipes/recipe_cN.sh`: the exact server command (env + flags) for AgentX C12/C24/C48/C80 with every PR here and the
+  launch flags below.
 - `rejected.md`: candidates that were measured and not kept (what, measured, why).
 - `REPORT.md` + `pareto.png`: latest agentic results vs the fork and NVIDIA (2026-11-05).
 - `tools/export.sh <NN-name> --sglang <range> [--aiter <dir> <range>]`: write a PR's patches + stats from commits.
@@ -62,6 +63,23 @@ because 05's fused kernel attends the MTP drafted tail that upstream's HIP fallb
 PR 15 (HC prefill fusion) was added after this measurement (gated against this stack, see its meta.yaml); the table above
 does not include it.
 
+## Launch flags
+
+Two server flags in `recipes/` (C12-C80) that are not code changes. Both come from the NVIDIA B300 recipe.
+Gate = A/B on one MI355X, B vs mean of 2 base runs (CONFIRM=1), tput / P90 interactivity, on this branch's stack
+(sglang 2da35881db, AITER 32ac35904), 2026-11-05, acceptance pinned 2.32. Agentic = AgentX 3600 s, one run per arm
+on different GPUs (agentic noise is about +-10%), on the InferenceX #4832 stack (sglang 1ced9a9eb0 + #4832 patches,
+AITER 285579b62 + #4832 patches, #4832 recipe), 2026-11-06, acceptance pinned 2.32.
+
+| Flag | What it does | Gate (64k-prefix multi-turn / 16k cold) | Agentic C12 | Agentic C80 | Cost |
+|---|---|---|---|---|---|
+| `--cuda-graph-backend-prefill breakable` | Runs prefill (and extend) as breakable CUDA graphs, 74 token buckets 4-16384. Default on CUDA, off on ROCm. | c24 +6.6% / +3.0%, c80 +8.4% / +1.0%; 16k c24 +6.5% / +5.7%, c80 +8.2% / +7.4%. TTFT of 256 new tokens on a 64k cached prefix 114 -> 42 ms | +2.3% P90 / +1.5% tput, TTFT p90 -3.5% | +1.6% P90 / +4.0% tput, TTFT p90 -5.8% | 17-20 GB graph pool from the headroom after the KV pool (KV pool unchanged), ~45 s startup. Serving at C80 left 0.04-0.11 GiB free (no OOM in 1 h). |
+| `--mamba-track-interval 262144` | No Mamba state checkpoints during decode (256 = one checkpoint every 256 generated tokens). AgentX never re-sends model output, so those checkpoints are never reused; without them the GPU cache keeps prompt prefixes instead of spilling them to HiCache. | c24 +5.1% / +8.4%, c80 +7.8% / +19.5%; 16k flat | +0.1% P90 / +0.6% tput (cache already ~95% GPU hits) | +13.6% P90 / +8.3% tput, TTFT p90 -21.7%; GPU-tier prefix hits 84.0% -> 93.2% (all-tier hits 92.4% -> 93.8%) | none measured; loses decode-time prefix reuse for clients that re-send model output |
+
+Both flags together were not measured. GSM8K (1319, real MTP verification, C24): 96.3% with the prefill graph flag,
+97.0% with 262144 (base 96.6%). Files: `results/gates/{bpg-breakable-prefill,mamba-track-interval-nv}.json`, agentic
+`results/runs/ix4832_*` and `ix4832mti_*` in the glab experiment.
+
 ## Summary
 
 <!-- summary:begin -->
@@ -81,7 +99,6 @@ does not include it.
 | [19-packed-fp8-gdn-in-proj](19-packed-fp8-gdn-in-proj/) | [Perf] [AMD] Qwen4-Exp: enable packed FP8 GDN in_proj on ROCm | no PR | alternative: [sglang#39912](https://github.com/sgl-project/sglang/pull/39912) ![draft](https://img.shields.io/badge/-draft-lightgrey) | sglang: 2 files, +18 / -5 | bundle 18-21 agentic C24 leave-one-out: +2.9 P90 (1.5 sd, within noise) / +1.1k tput (+0.9%); 64k-prefix multi-turn on the stack + 15: c48 +8.4% tput / +4.2% P90, c80 +4.5% / +0.9% (2 sequences); alone (with 18) +0.05% to +1.8% tput, +1.1% to +3.0% P90 (2026-11-04/05, MI355X TP1; agentic arm runs/agentic_loo_Lnobundle_c24 (HIP 4) vs FULL L0/L0b (HIP 7), AITER 285579b62 + 03, 04 (+ 01 in FULL)) | 99fd01047d / - |
 | [20-lm-head-aiter-gemm](20-lm-head-aiter-gemm/) | [Perf] [AMD] lm_head: Opt-in aiter tgemm for the bf16 lm_head on gfx950 | [sglang#47485](https://github.com/sgl-project/sglang/pull/47485) ![open](https://img.shields.io/badge/-open-yellow) | none found | sglang: 2 files, +8 / -1 | alone -1.1% to +1.75% (2026-11-03 gates); part of the bundle 18-21, agentic C24 leave-one-out +2.9 P90 / +1.1k tput (within noise), see 19 (2026-11-03 gates and 2026-11-05 agentic, MI355X TP1) | 99fd01047d / - |
 | [21-shared-attn-fp8-quant](21-shared-attn-fp8-quant/) | [Perf] [AMD] Qwen4-Exp QSA: share the per-token FP8 quant of qkv_proj and index_qk_proj | no PR | alternative: [sglang#34502](https://github.com/sgl-project/sglang/pull/34502) ![open](https://img.shields.io/badge/-open-yellow)<br>alternative: [sglang#29723](https://github.com/sgl-project/sglang/pull/29723) ![open](https://img.shields.io/badge/-open-yellow) | sglang: 5 files, +63 / -13 | alone +0.2% to +2.75% (2026-11-03 gates, ~15 us per QSA layer); part of the bundle 18-21, agentic C24 leave-one-out +2.9 P90 / +1.1k tput (within noise), see 19 (2026-11-03 gates and 2026-11-05 agentic, MI355X TP1) | 99fd01047d / - |
-| [22-prefill-breakable-graph-rocm](22-prefill-breakable-graph-rocm/) | [Perf] [AMD] cuda graph: default prefill to breakable CUDA graphs on ROCm | no PR | none found | sglang: 1 files, +3 / -3 | gate vs mean of 2 base runs (CONFIRM=1), tput / P90: shaped c24 +7.4% / +5.9%, shaped c80 +8.7% / +6.4%, short c24 +5.8% / +5.1%, short c80 +7.9% / +8.1% (explicit-flag gate bpg-breakable-prefill: +6.5..+8.4% tput). TTFT 64k cached prefix + 256/1024/4096 new: 115/119/151 -> 53/73/147 ms. Cost: capture +46 s, graph pool +19.9 GB (target 18.3 + draft 1.6) from post-KV headroom, KV pool unchanged. Agentic (incl. OOM headroom) not measured (2026-11-05 19:24-20:55Z, node b23-07, MI355X TP1 rocm-smi 2 (c24) / 3 (c80); A = stack sglang 2da35881db + AITER 32ac35904, B = A + this PR (190a722948); results/gates/bcg-prefill-rocm.json) | 99fd01047d / - |
 <!-- summary:end -->
 
 ## Ranking
