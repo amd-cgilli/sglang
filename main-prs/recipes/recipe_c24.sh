@@ -39,6 +39,8 @@ export SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token
 #   --mamba-track-interval 262144: no Mamba state checkpoints during decode (AgentX never re-sends model output),
 #     so the cache keeps prompt prefixes on the GPU instead of spilling them to HiCache. Gate 64k-prefix multi-turn
 #     c24 +5.1% tput / +8.4% P90, c80 +7.8% / +19.5%; agentic C80 +8.3% tput / +13.6% P90, C12 neutral.
+#   No HiCache at C12/C24 (GPU-only, as NVIDIA): agentic on/off on this stack 2026-11-06, C12 +1.7% P90 / -0.1% tput,
+#     C24 +1.2% / -0.25% with it off (noise); host-tier hits 0.03% / 0.2%, so the 200 GB host pool bought nothing.
 python -m sglang.launch_server \
   --host 0.0.0.0 --port ${PORT:-8000} \
   --model-path amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8 \
@@ -76,11 +78,6 @@ python -m sglang.launch_server \
   --mamba-radix-cache-strategy extra_buffer_lazy \
   --mamba-track-interval 262144 \
   --cuda-graph-backend-prefill breakable \
-  --enable-hierarchical-cache \
-  --hicache-size 200 \
-  --hicache-io-backend kernel \
-  --hicache-mem-layout page_first \
-  --hicache-write-policy write_back
 
 # Client (InferenceX inferencex-e2e AgentX replay, as in the official runs):
 #   agentx profile --url http://127.0.0.1:${PORT:-8000} --model qwen3.8-flash-next --tokenizer amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8 \

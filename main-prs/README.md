@@ -65,7 +65,8 @@ does not include it.
 
 ## Launch flags
 
-Two server flags in `recipes/` (C12-C80) that are not code changes. Both come from the NVIDIA B300 recipe.
+Server flags in `recipes/` that are not code changes, all from the NVIDIA B300 recipe. The HiCache row is an agentic
+A/B on this branch's stack (sglang 99fd01047d + PRs 05-21 with both flags above, AITER 285579b62 + 03, 04, 18), 2026-11-06.
 Gate = A/B on one MI355X, B vs mean of 2 base runs (CONFIRM=1), tput / P90 interactivity, on this branch's stack
 (sglang 2da35881db, AITER 32ac35904), 2026-11-05, acceptance pinned 2.32. Agentic = AgentX 3600 s, one run per arm
 on different GPUs (agentic noise is about +-10%), on the InferenceX #4832 stack (sglang 1ced9a9eb0 + #4832 patches,
@@ -75,10 +76,12 @@ AITER 285579b62 + #4832 patches, #4832 recipe), 2026-11-06, acceptance pinned 2.
 |---|---|---|---|---|---|
 | `--cuda-graph-backend-prefill breakable` | Runs prefill (and extend) as breakable CUDA graphs, 74 token buckets 4-16384. Default on CUDA, off on ROCm. | c24 +6.6% / +3.0%, c80 +8.4% / +1.0%; 16k c24 +6.5% / +5.7%, c80 +8.2% / +7.4%. TTFT of 256 new tokens on a 64k cached prefix 114 -> 42 ms | +2.3% P90 / +1.5% tput, TTFT p90 -3.5% | +1.6% P90 / +4.0% tput, TTFT p90 -5.8% | 17-20 GB graph pool from the headroom after the KV pool (KV pool unchanged), ~45 s startup. Serving at C80 left 0.04-0.11 GiB free (no OOM in 1 h). |
 | `--mamba-track-interval 262144` | No Mamba state checkpoints during decode (256 = one checkpoint every 256 generated tokens). AgentX never re-sends model output, so those checkpoints are never reused; without them the GPU cache keeps prompt prefixes instead of spilling them to HiCache. | c24 +5.1% / +8.4%, c80 +7.8% / +19.5%; 16k flat | +0.1% P90 / +0.6% tput (cache already ~95% GPU hits) | +13.6% P90 / +8.3% tput, TTFT p90 -21.7%; GPU-tier prefix hits 84.0% -> 93.2% (all-tier hits 92.4% -> 93.8%) | none measured; loses decode-time prefix reuse for clients that re-send model output |
+| No HiCache at C12/C24 (drop `--enable-hierarchical-cache --hicache-*`) | GPU-only at C12/C24, like NVIDIA; C48/C80 keep HiCache 298 GB. | not run | +1.7% P90 / -0.1% tput (our stack) | C24: +1.2% / -0.25% (our stack) | none; frees ~199 GB of pinned host RAM. Host-tier hits with it on were 0.03% (C12) / 0.2% (C24): the GPU radix cache does fill and evict (3.3M / 13.1M tokens per run), but evicted prefixes are almost never reused. |
 
-Both flags together were not measured. GSM8K (1319, real MTP verification, C24): 96.3% with the prefill graph flag,
+With both flags (and HiCache off) this branch's stack runs agentic C12 at 147.7 P90 / 66.0k tput and C24 at 99.0 / 126.3k
+(2026-11-06, one run each); the pair was not A/B'd against neither. GSM8K (1319, real MTP verification, C24): 96.3% with the prefill graph flag,
 97.0% with 262144 (base 96.6%). Files: `results/gates/{bpg-breakable-prefill,mamba-track-interval-nv}.json`, agentic
-`results/runs/ix4832_*` and `ix4832mti_*` in the glab experiment.
+`results/runs/ix4832_*`, `ix4832mti_*` and `hcoff_*` in the glab experiment.
 
 ## Summary
 
