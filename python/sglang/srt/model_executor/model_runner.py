@@ -1720,6 +1720,19 @@ class ModelRunner:
             return
         self.init_decode_cuda_graph()
 
+    def recapture_cuda_graphs(self, prefill: bool, decode: bool) -> None:
+        """Release and recapture the prefill / decode graphs of a target runner,
+        e.g. after its model code was patched by a hot reload (a spec worker
+        recaptures its draft's graphs itself)."""
+        # Free the old graphs first so the recapture reuses their pool memory.
+        for runner in (self.prefill_cuda_graph_runner, self.decode_cuda_graph_runner):
+            if runner is not None and runner is not self.eager_runner:
+                runner.backend.cleanup()
+        if prefill:
+            self.init_prefill_cuda_graph()
+        if decode:
+            self.init_decode_cuda_graph()
+
     def ensure_decode_cuda_graphs(self, capture_bs: Optional[list[int]] = None):
         """Idempotently capture decode CUDA graphs after startup.
 

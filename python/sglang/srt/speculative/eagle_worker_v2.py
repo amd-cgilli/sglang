@@ -300,6 +300,25 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         if (c := self.draft_runner.canary_manager) is not None:
             c.mark_init_finished()
 
+    def recapture_cuda_graphs(self, prefill: bool) -> None:
+        """Release and recapture the draft's prefill, decode and extend graphs."""
+        for runner in (
+            self.draft_runner.prefill_cuda_graph_runner,
+            self.cuda_graph_runner,
+            self.cuda_graph_runner_for_draft_extend,
+        ):
+            if runner is not None:
+                runner.backend.cleanup()
+        with (
+            draft_pp_context(),
+            draft_tp_context(self.parallel_layout),
+            speculative_moe_backend_context(),
+            speculative_moe_a2a_backend_context(),
+        ):
+            if prefill:
+                self.draft_runner.init_prefill_cuda_graph(force_for_draft_worker=True)
+            self._capture_cuda_graphs()
+
     def _init_dsa_index_share_state(self) -> None:
         # Populate DSA index-share fields from the draft runner's hf_config.
         # Reused by the attention unit-test harnesses, which skip __init__.

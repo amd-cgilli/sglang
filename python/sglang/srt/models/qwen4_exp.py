@@ -1262,6 +1262,14 @@ class Qwen4ExpPLELayer(nn.Module):
 
         return F.silu(conv_output[batch.req_indices, batch.token_offsets])
 
+    def reset_aborted_forward(self) -> None:
+        """Drop a prefetch whose forward raised before consuming it (hot reload)."""
+        if self._prefetch_state is not None:
+            torch.get_device_module().current_stream().wait_stream(
+                self._prefetch_stream
+            )
+            self._prefetch_state = None
+
     def forward_idle(self, forward_batch: ForwardBatch) -> None:
         if self._prefetch_state is not None:
             self._consume_prefetched_embeddings(forward_batch)

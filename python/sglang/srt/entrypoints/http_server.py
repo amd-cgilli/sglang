@@ -139,6 +139,7 @@ from sglang.srt.managers.io_struct import (
     EndWeightUpdateReqInput,
     GenerateReqInput,
     GetWeightsByNameReqInput,
+    HotReloadReqInput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
     LoadLoRAAdapterFromTensorsReqInput,
@@ -1622,6 +1623,24 @@ async def slow_down(obj: Annotated[SlowDownReqInput, Body()], request: Request):
         await _global_state.tokenizer_manager.slow_down(obj, request)
     except Exception as e:
         return _create_error_response(e)
+
+
+@app.api_route("/hot_reload", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def hot_reload(obj: Annotated[HotReloadReqInput, Body()], request: Request):
+    """Apply a forward-pass candidate (requires --enable-hot-reload; idle engine only)."""
+    result = await _global_state.tokenizer_manager.hot_reload(obj)
+    status = HTTPStatus.OK if result["ok"] else HTTPStatus.BAD_REQUEST
+    return ORJSONResponse(result, status_code=status)
+
+
+@app.api_route("/hot_reload/teardown", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def hot_reload_teardown(request: Request):
+    """Undo the applied candidate and recapture the baseline graphs."""
+    result = await _global_state.tokenizer_manager.hot_reload(HotReloadReqInput())
+    status = HTTPStatus.OK if result["ok"] else HTTPStatus.BAD_REQUEST
+    return ORJSONResponse(result, status_code=status)
 
 
 @app.api_route("/pd_role_switch", methods=["POST"])
