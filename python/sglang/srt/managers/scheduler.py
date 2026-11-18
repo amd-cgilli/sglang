@@ -178,6 +178,8 @@ from sglang.srt.managers.io_struct import (
     GetInternalStateReq,
     GetWeightsByNameReqInput,
     HealthCheckOutput,
+    HotReloadReqInput,
+    HotReloadReqOutput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsSendGroupForRemoteInstanceReqOutput,
     InitWeightsUpdateGroupReqInput,
@@ -1433,6 +1435,7 @@ class Scheduler(
         self._last_logged_elastic_radix_namespace: Optional[str] = None
         self.session_controller = SessionController(self.tree_cache)
         self.forward_sleep_time = None
+        self.hot_reloader = None
 
     def init_pause_state(self):
         self.pause_state = PauseState()
@@ -2047,6 +2050,7 @@ class Scheduler(
                     self.weight_updater.check_weights,
                 ),
                 (SlowDownReqInput, self.slow_down),
+                (HotReloadReqInput, self.hot_reload),
                 (PdRoleSwitchReqInput, self.handle_pd_role_switch),
                 (
                     ProfileReq,
@@ -6887,6 +6891,19 @@ class Scheduler(
             t = None
         self.forward_sleep_time = t
         return SlowDownReqOutput()
+
+    def hot_reload(self, recv_req: HotReloadReqInput):
+        if not self.server_args.enable_hot_reload:
+            result = {"ok": False, "error": "--enable-hot-reload is not set"}
+        else:
+            from sglang.srt.hot_reload import HotReloader
+
+            if self.hot_reloader is None:
+                self.hot_reloader = HotReloader(self)
+            result = self.hot_reloader.handle(
+                recv_req.candidate_path, recv_req.mem_floor_bytes
+            )
+        return HotReloadReqOutput(success=result["ok"], result=result)
 
     def handle_pd_role_switch(self, recv_req: PdRoleSwitchReqInput):
         return role_switch.handle_pd_role_switch(self, recv_req)

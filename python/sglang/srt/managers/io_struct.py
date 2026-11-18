@@ -2501,6 +2501,21 @@ class SlowDownReqOutput(BaseReq, kw_only=True):
     pass
 
 
+class HotReloadReqInput(BaseReq, kw_only=True):
+    # Candidate directory (patch.py + kernels/); None tears the applied one down.
+    candidate_path: Optional[str] = None
+    # Fail (and roll back) when free VRAM + allocator reserve drops below this.
+    mem_floor_bytes: int = 0
+    # Run a short real generation after a successful reload.
+    warmup: bool = True
+
+
+class HotReloadReqOutput(BaseReq, kw_only=True):
+    success: bool
+    # ok, error, candidate_hash, cache_hit, timings, ... (see srt/hot_reload.py)
+    result: Dict[str, Any]
+
+
 class PdRoleSwitchReqInput(BaseReq, kw_only=True):
     # Target role; "" is an invalid sentinel rejected by the handler.
     new_role: Literal["prefill", "decode", ""] = ""

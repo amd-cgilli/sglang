@@ -4,7 +4,9 @@ import asyncio
 import copy
 import hashlib
 import logging
+import math
 import time
+import traceback
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -39,12 +41,15 @@ from sglang.srt.managers.io_struct import (
     ExpertDistributionReqType,
     FlushCacheReqInput,
     FlushCacheReqOutput,
+    GenerateReqInput,
     GetHiCacheL3LayoutReq,
     GetHiCacheL3LayoutReqOutput,
     GetInternalStateReq,
     GetInternalStateReqOutput,
     GetWeightsByNameReqInput,
     GetWeightsByNameReqOutput,
+    HotReloadReqInput,
+    HotReloadReqOutput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsSendGroupForRemoteInstanceReqOutput,
     InitWeightsUpdateGroupReqInput,
@@ -130,6 +135,7 @@ _COMMUNICATOR_SPECS = [
     ("resume_memory_occupation", ResumeMemoryOccupationReqOutput),
     ("check_weights", CheckWeightsReqOutput),
     ("slow_down", SlowDownReqOutput),
+    ("hot_reload", HotReloadReqOutput),
     ("pd_role_switch", PdRoleSwitchReqOutput),
     ("flush_cache", FlushCacheReqOutput),
     ("add_external_corpus", AddExternalCorpusReqOutput),
@@ -947,6 +953,42 @@ class TokenizerControlMixin:
     ):
         self.auto_create_handle_loop()
         await self.slow_down_communicator(obj)
+
+    async def hot_reload(
+        self: TokenizerManager, obj: HotReloadReqInput
+    ) -> Dict[str, Any]:
+        self.auto_create_handle_loop()
+        result = (await self.hot_reload_communicator(obj))[0].result
+        if result.get("noop") or not (
+            result["ok"] and obj.warmup and obj.candidate_path
+        ):
+            return result
+        # A short real generation, so a candidate that breaks serving fails here.
+        t0 = time.perf_counter()
+        try:
+            out = await self.generate_request(
+                GenerateReqInput(
+                    text="The capital of France is",
+                    sampling_params={
+                        "max_new_tokens": 8,
+                        "temperature": 0.0,
+                        "ignore_eos": True,
+                    },
+                    return_logprob=True,
+                )
+            ).__anext__()
+            logprobs = [lp for lp, *_ in out["meta_info"]["output_token_logprobs"]]
+            if len(logprobs) != 8 or not all(math.isfinite(lp) for lp in logprobs):
+                raise RuntimeError(f"bad warmup output: {out['meta_info']}")
+        except Exception:
+            result.update(ok=False, error=traceback.format_exc())
+            teardown = HotReloadReqInput(candidate_path=None)
+            rollback = (await self.hot_reload_communicator(teardown))[0].result
+            result.update(rolled_back=rollback["ok"], applied=rollback["applied"])
+        await self.flush_cache()
+        result["warmup_s"] = time.perf_counter() - t0
+        result["reload_s"] += result["warmup_s"]
+        return result
 
     async def pd_role_switch(
         self: TokenizerManager,

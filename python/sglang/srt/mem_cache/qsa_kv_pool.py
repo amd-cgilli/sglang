@@ -255,6 +255,12 @@ class QSATokenToKVPool(HybridLinearKVPool):
         k_size, v_size = self.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
 
+    def clear_request_state(self) -> None:
+        """Zero the per-request pending rings (flush_cache frees slots only)."""
+        for buffer in self.qsa_key_state_buffer_pool:
+            buffer.zero_()
+        self.qsa_rope_position_buffer.zero_()
+
     def get_qsa_key_state_buffer(self, layer_id: int) -> torch.Tensor:
         return self.qsa_key_state_buffer_pool[
             self._transfer_full_attention_id(layer_id)

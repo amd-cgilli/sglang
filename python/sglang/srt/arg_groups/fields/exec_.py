@@ -86,6 +86,10 @@ class ExecFeatures(msgspec.Struct):
         bool,
         "Enable users to pass custom logit processors to the server (disabled by default for security)",
     ] = False
+    enable_hot_reload: A[
+        bool,
+        "Enable /hot_reload and /hot_reload/teardown, which load model-code patches into the running engine and recapture its CUDA graphs (runs arbitrary Python; disabled by default for security).",
+    ] = False
     enable_watermark: A[
         bool,
         "Enable Aaronson-Gumbel text watermarking.",

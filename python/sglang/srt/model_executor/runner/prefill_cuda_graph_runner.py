@@ -1839,6 +1839,10 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             self._capture()
 
     def _capture(self) -> None:
+        # share_buffers() may alias buffers a previous runner served with, and
+        # capture runs real forwards: a mid-serving recapture (hot reload) would
+        # otherwise track mamba state through the last batch's live mask/slots.
+        self.buffers.reset_index_buffers()
         # Warm up + autotune kernels once before capture (run-once across the
         # decode + prefill runners; see BaseRunner.warmup).
         self.warmup()

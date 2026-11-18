@@ -31,6 +31,8 @@
   "/health_generate": "normal",
   "/hicache/storage-backend": "admin_force",
   "/hicache/storage-backend/clear": "admin_optional",
+  "/hot_reload": "admin_force",
+  "/hot_reload/teardown": "admin_force",
   "/init_weights_send_group_for_remote_instance": "admin_force",
   "/init_weights_update_group": "admin_force",
   "/internal/peer": "admin_optional",
