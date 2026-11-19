@@ -44,6 +44,12 @@ from sglang.srt.constants import GIB_BYTES
 from sglang.srt.kernel_plugins.amd.binding import (
     monokernel_weights_iterator,
 )
+from sglang.srt.model_loader.layer_selection import (
+    KEEP_LAYERS_KEY,
+    LayerSelection,
+    select_layer_files,
+    select_layer_weights,
+)
 from sglang.srt.model_loader.post_load import stage_module_for_post_load
 from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
     RemoteInstanceWeightLoaderBackend,
@@ -383,7 +389,7 @@ def _validate_default_loader_extra_config(
         # options, so newer versions can add parameters without a SGLang update.
         return
 
-    allowed_keys = {"enable_multithread_load", "num_threads"}
+    allowed_keys = {"enable_multithread_load", "num_threads", KEEP_LAYERS_KEY}
     if load_format == LoadFormat.FASTSAFETENSORS:
         allowed_keys.add("enable_gds")
         if "enable_gds" in extra_config and not isinstance(
@@ -654,6 +660,11 @@ class DefaultModelLoader(BaseModelLoader):
             hf_folder = resolved_source.hf_folder
             hf_weights_files = list(resolved_source.weight_files)
             use_safetensors = resolved_source.use_safetensors
+        selection = self._layer_selection(source)
+        if selection is not None:
+            hf_weights_files = select_layer_files(
+                selection, hf_folder, hf_weights_files, source.safetensors_index_file
+            )
         _checkpoint_files[(source.model_or_path, source.revision)] = (
             hf_folder,
             tuple(hf_weights_files),
@@ -754,6 +765,9 @@ class DefaultModelLoader(BaseModelLoader):
             else:
                 weights_iterator = pt_weights_iterator(hf_weights_files)
 
+        if selection is not None:
+            weights_iterator = select_layer_weights(weights_iterator, selection)
+
         if self.load_config.draft_model_idx is not None:
             return self._filter_mtp_weights(
                 weights_iterator, source.prefix, self.load_config.draft_model_idx
@@ -763,6 +777,19 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
+
+    def _layer_selection(self, source: Source) -> Optional[LayerSelection]:
+        """The target's ``keep_layers`` (set on its ModelConfig; drafts have none)."""
+        selection = getattr(source.model_config, "layer_selection", None)
+        if selection is not None and self.load_config.load_format in (
+            LoadFormat.NPCACHE,
+            LoadFormat.INSTANTTENSOR,
+        ):
+            raise ValueError(
+                f"{KEEP_LAYERS_KEY} is not supported with --load-format "
+                f"{self.load_config.load_format}"
+            )
+        return selection
 
     @classmethod
     def _filter_mtp_weights(
@@ -828,6 +855,11 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_folder,
                     "model.safetensors.index.json",
                     source.model_config.hf_config,
+                )
+            selection = self._layer_selection(source)
+            if selection is not None:
+                weight_files = select_layer_files(
+                    selection, hf_folder, weight_files, source.safetensors_index_file
                 )
             resolved_sources.append(
                 DefaultModelLoader.ResolvedSource(

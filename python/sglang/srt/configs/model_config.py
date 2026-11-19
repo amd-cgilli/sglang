@@ -718,6 +718,7 @@ class ModelConfig:
         speculative_algorithm: Optional[str] = None,
         is_draft_quantization_explicit: bool = False,
         uocr_v2_default_context_len: int = FALLBACK_CONTEXT_LENGTH,
+        keep_layers: Optional[List[int]] = None,
     ) -> None:
         # Parse args
         self.model_path = model_path
@@ -774,6 +775,11 @@ class ModelConfig:
             self.model_path, self.revision = base
             revision = self.revision
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.layer_selection = None
+        if keep_layers is not None:
+            self._select_layers(
+                keep_layers, trust_remote_code, revision, model_config_parser, kwargs
+            )
         self.decision_config = None
         if self.hf_config.architectures == ["Qwen3_5Model"]:
             self.decision_config = load_decision_config(self.model_path, revision)
@@ -1075,6 +1081,37 @@ class ModelConfig:
             self.hf_config, "is_matryoshka", False
         )
 
+    def _select_layers(
+        self, keep_layers, trust_remote_code, revision, model_config_parser, kwargs
+    ) -> None:
+        """Reduce the model to the decoder layers of ``keep_layers`` (see
+        sglang.srt.model_loader.layer_selection)."""
+        from sglang.srt.model_loader.layer_selection import (
+            num_checkpoint_layers,
+            select_config_layers,
+        )
+
+        def load_raw_text_config():
+            return get_hf_text_config(
+                get_config(
+                    self.model_path,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    model_config_parser=model_config_parser,
+                    **kwargs,
+                )
+            )
+
+        self.layer_selection = select_config_layers(
+            self.hf_text_config,
+            keep_layers,
+            num_checkpoint_layers(
+                self.hf_text_config, self.model_override_args, load_raw_text_config
+            ),
+            quant_config=getattr(self.hf_config, "quantization_config", None)
+            or getattr(self.hf_text_config, "quantization_config", None),
+        )
+
     @staticmethod
     def from_server_args(
         server_args: ServerArgs,
@@ -1095,6 +1132,10 @@ class ModelConfig:
                     context_length=context_length,
                     **kwargs,
                 )
+
+        from sglang.srt.model_loader.layer_selection import (
+            keep_layers_from_extra_config,
+        )
 
         cfg = resolving_view(server_args)
         quantization = (
@@ -1139,6 +1180,12 @@ class ModelConfig:
             uocr_v2_default_context_len=UocrDocumentConfig.from_args(
                 cfg
             ).default_context_length(),
+            # Only the target is reduced: a draft reads the full checkpoint config.
+            keep_layers=(
+                None
+                if is_draft_model
+                else keep_layers_from_extra_config(cfg.model_loader_extra_config)
+            ),
             **kwargs,
         )
 
