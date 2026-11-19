@@ -14,7 +14,8 @@ original objects.
 POST /hot_reload {candidate_path} undoes the applied candidate, imports the new
 one under a module name holding its content hash (kept, so A -> B -> A reuses the
 module and its already-compiled kernels), applies it, flushes the caches and
-state pools, and recaptures every CUDA graph of the target and the draft. Any
+state pools, resets the Dynamo caches and recaptures every CUDA graph of the
+target and the draft, so a do-nothing reload serves what startup served. Any
 exception rolls back to the baseline. POST /hot_reload/teardown goes back to the
 baseline.
 """
@@ -304,6 +305,13 @@ class HotReloader:
             if hasattr(pool, "clear_request_state"):
                 pool.clear_request_state()
         t = time.perf_counter()
+        # Recapture with the compile state of startup. Dynamo tries the newest cache
+        # entry of a torch.compile'd function first: at startup the largest prefill
+        # graph is captured while only the static-shape entry exists, a recapture
+        # would replay the dynamic-shape entry added later (e.g. HyperConnection
+        # mixing: Triton template mm instead of hipBLASLt, ~10 % slower prefill).
+        # Recompiling is served by the Inductor caches.
+        torch._dynamo.reset()
         g = self.graphs
         self.target_runner.recapture_cuda_graphs(
             prefill=g["target_prefill"], decode=g["target_decode"]
