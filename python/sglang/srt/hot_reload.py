@@ -27,6 +27,7 @@ import hashlib
 import importlib.util
 import inspect
 import logging
+import os
 import sys
 import time
 import traceback
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 _MODULES: Dict[str, Any] = {}
 # Patches not undone yet; a candidate whose apply raises is rolled back through them.
 _LIVE_PATCHES: List[Patches] = []
+# Dirs that never change what a candidate runs.
+_HASH_SKIP_DIRS = {"__pycache__", ".git"}
 
 
 def _own_attr(obj, name):
@@ -109,17 +112,23 @@ def load_hip_extension(name: str, sources: List[str], **kwargs):
 
 
 def candidate_hash(path: Path) -> str:
+    """Content hash of the whole candidate dir.
+
+    Every file counts (relative path + contents, sorted walk), not only patch.py
+    and kernels/: patch.py may read any file of the dir, so a change anywhere must
+    give a new module instead of a noop or a cached one. Only __pycache__ and .git
+    are skipped.
+    """
+    if not (path / "patch.py").is_file():
+        raise FileNotFoundError(f"{path / 'patch.py'}: not a candidate dir")
     h = hashlib.sha256()
-    kernels = path / "kernels"
-    files = [path / "patch.py"]
-    if kernels.is_dir():
-        files += sorted(
-            p
-            for p in kernels.rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts
-        )
-    for f in files:
-        h.update(str(f.relative_to(path)).encode() + b"\0" + f.read_bytes() + b"\0")
+    for dirpath, dirs, files in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if d not in _HASH_SKIP_DIRS)
+        for name in sorted(files):
+            f = Path(dirpath) / name
+            rel = f.relative_to(path).as_posix()
+            h.update(rel.encode() + b"\0")
+            h.update(hashlib.sha256(f.read_bytes()).digest())
     return h.hexdigest()[:16]
 
 
