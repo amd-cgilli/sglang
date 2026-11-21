@@ -417,6 +417,11 @@ class SchedulerProfilerManager:
 
         if self.profile_by_stage:
             if batch.forward_mode.is_prefill():
+                if self.profiler_decode_ct > 0:
+                    # The decode stage capture has started: a prefill batch
+                    # admitted now must not stop it (it would be written under
+                    # the EXTEND name) nor start another capture.
+                    return
                 if self.profiler_prefill_ct == 0:
                     self._start_profile(batch.forward_mode)
                 self.profiler_prefill_ct += 1
